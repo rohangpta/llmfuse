@@ -1,14 +1,23 @@
 """
-LLM evaluation pipeline for FUSE filesystem operations.
+Unified evaluation pipeline for FUSE filesystem operations.
 
 This module evaluates LLM performance on filesystem operations by testing
-the LLM-driven FUSE filesystem against ground truth data.
+different models (Gemini via API, Qwen via Modal) against ground truth data.
+
+Usage:
+    python -m src.eval --data data/fs_data.jsonl --models gemini,qwen3-1.7b,qwen3-4b
+    python -m src.eval --data data/fs_data.jsonl --models gemini --max-examples 100
+    python -m src.eval --data data/fs_data.jsonl --models qwen3-8b --output eval_qwen_8b.json
 """
-# Standard library imports
+
+import argparse
 import json
 import os
+import sys
 import tempfile
 import time
+import asyncio
+import subprocess
 from collections import defaultdict
 from typing import Dict, List, Tuple, Any, Optional
 
@@ -20,9 +29,15 @@ from .utils import extract_result_from_llm_output
 
 # Evaluation constants
 DEFAULT_BATCH_SIZE = 10
-SIMILARITY_THRESHOLD = 0.7  # More lenient for minor formatting differences
+SIMILARITY_THRESHOLD = 0.7
 MAX_EXAMPLES_DEFAULT = 50
 FUSE_OPERATION_TIMEOUT = 30
+
+# Model configuration
+QWEN_MODELS = {
+    "qwen3-0.6b", "qwen3-1.7b", "qwen3-4b", "qwen3-8b", "qwen3-14b", "qwen3-32b"
+}
+GEMINI_MODELS = {"gemini", "gemini-2.5-flash", "gemini-pro", "models/gemini-2.5-flash-preview-05-20"}
 
 def parse_fuse_operation(operation_str: str) -> Tuple[str, str, Dict[str, Any]]:
     """
@@ -129,114 +144,113 @@ def simulate_fuse_operation(fs: LLMFS, operation: str, path: str, **params) -> T
     except Exception as e:
         return False, str(e)
 
-def evaluate_single_example(example: Dict[str, Any]) -> Dict[str, Any]:
+def calculate_similarity(predicted: str, expected: str, operation_type: str = "unknown") -> float:
     """
-    Evaluate a single training example using the LLM-driven FUSE filesystem.
+    Calculate similarity between predicted and expected results.
+    """
+    if not predicted or not expected:
+        return 0.0
     
-    Args:
-        example: Training example with initial_state, operation, result, operation_type
+    predicted = predicted.strip()
+    expected = expected.strip()
+    
+    # Exact match
+    if predicted == expected:
+        return 1.0
+    
+    # For query operations, use more flexible matching
+    if operation_type == "query":
+        # Remove extra whitespace and compare
+        pred_normalized = ' '.join(predicted.split())
+        exp_normalized = ' '.join(expected.split())
         
-    Returns:
-        Dictionary with evaluation results
+        if pred_normalized == exp_normalized:
+            return 1.0
+        
+        # Check if key information is present
+        if operation_type == "getattr" or "stat" in expected.lower():
+            # For getattr operations, check if size/mode info is present
+            pred_lower = predicted.lower()
+            exp_lower = expected.lower()
+            
+            score = 0.0
+            total_checks = 0
+            
+            # Check for size information
+            if "size" in exp_lower:
+                total_checks += 1
+                if "size" in pred_lower:
+                    score += 0.3
+            
+            # Check for mode information
+            if "mode" in exp_lower or "permissions" in exp_lower:
+                total_checks += 1
+                if "mode" in pred_lower or any(perm in pred_lower for perm in ["644", "755", "rwx"]):
+                    score += 0.3
+            
+            # Check for type information
+            if "type" in exp_lower:
+                total_checks += 1
+                if "type" in pred_lower or any(t in pred_lower for t in ["file", "directory", "dir"]):
+                    score += 0.4
+            
+            if total_checks > 0:
+                return score
+    
+    # Fallback to simple word overlap
+    pred_words = set(predicted.lower().split())
+    exp_words = set(expected.lower().split())
+    
+    if not exp_words:
+        return 0.0
+    
+    overlap = len(pred_words.intersection(exp_words))
+    return overlap / len(exp_words)
+
+def evaluate_single_example_local(example: Dict[str, Any], model_name: str = "gemini") -> Dict[str, Any]:
+    """
+    Evaluate a single training example using local model (Gemini API).
     """
     try:
-        # Initialize LLM filesystem with the initial state
-        fs = LLMFS(initial_state=example['initial_state'])
-        
-        # Parse the operation
-        operation_str = example['operation']
-        op_name, path, params = parse_fuse_operation(operation_str)
-        
-        # Handle shell commands vs FUSE operations
-        if op_name == 'shell':
-            # For shell commands, we need to evaluate differently
-            # This is a fallback for backwards compatibility
-            return evaluate_shell_command_example(example)
-        
-        # Execute the operation
-        success, result = simulate_fuse_operation(fs, op_name, path, **params)
-        
-        if not success:
-            return {
-                'correct': False,
-                'predicted': f"Error: {result}",
-                'expected': example['result'],
-                'operation': operation_str,
-                'operation_type': example['operation_type'],
-                'error': f"Operation failed: {result}"
-            }
-        
-        # Get the result based on operation type
-        if example['operation_type'] == 'query':
-            # For query operations, compare the direct result
-            predicted = str(result) if result is not None else ""
-            expected = example['result']
-            
-            # Use operation-type-aware similarity for query results
-            correct = calculate_similarity(predicted, expected, example['operation_type']) > SIMILARITY_THRESHOLD
-            
-        else:
-            # For state-changing operations, compare the filesystem state
-            predicted_state = fs._get_state_string()
-            expected_state = example['result']
-            
-            correct = calculate_similarity(predicted_state, expected_state, example['operation_type']) > SIMILARITY_THRESHOLD
-            predicted = predicted_state
-            expected = expected_state
-        
-        return {
-            'correct': correct,
-            'predicted': predicted,
-            'expected': expected,
-            'operation': operation_str,
-            'operation_type': example['operation_type']
-        }
-        
-    except Exception as e:
-        return {
-            'correct': False,
-            'predicted': f"Error: {str(e)}",
-            'expected': example['result'],
-            'operation': example['operation'],
-            'operation_type': example['operation_type'],
-            'error': str(e)
-        }
+        # Create the evaluation prompt
+        prompt = f"""You are simulating a filesystem. Given the current state and operation, predict the exact result.
 
-def evaluate_shell_command_example(example: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Fallback evaluation for shell command examples (backwards compatibility).
-    
-    Args:
-        example: Training example with shell command operation
-        
-    Returns:
-        Dictionary with evaluation results
-    """
-    try:
-        # Use the model to predict the result directly
-        prompt = f"""Given the filesystem state and operation, predict the result.
-
-Initial filesystem state:
+Current filesystem state:
 {example['initial_state']}
 
 Operation: {example['operation']}
 
-Expected result format: {'filesystem state tree' if example['operation_type'] == 'state_change' else 'command output'}
+Provide only the result as it would appear after the operation:"""
 
-Result:"""
-
-        predicted = get_model_response(prompt, temperature=0.0)
-        predicted = extract_result_from_llm_output(predicted)
+        # Get model response
+        if model_name in GEMINI_MODELS:
+            response = get_model_response(prompt, model_name=model_name)
+        else:
+            response = f"ERROR: Unsupported local model: {model_name}"
         
+        if response.startswith("ERROR:"):
+            return {
+                'correct': False,
+                'predicted': response,
+                'expected': example['result'],
+                'operation': example['operation'],
+                'operation_type': example.get('operation_type', 'unknown'),
+                'error': response
+            }
+        
+        predicted = response.strip()
         expected = example['result']
-        correct = calculate_similarity(predicted, expected, example['operation_type']) > SIMILARITY_THRESHOLD
+        
+        similarity = calculate_similarity(predicted, expected, example.get('operation_type', 'unknown'))
+        correct = similarity > SIMILARITY_THRESHOLD
         
         return {
             'correct': correct,
             'predicted': predicted,
             'expected': expected,
             'operation': example['operation'],
-            'operation_type': example['operation_type']
+            'operation_type': example.get('operation_type', 'unknown'),
+            'similarity': similarity
         }
         
     except Exception as e:
@@ -245,285 +259,290 @@ Result:"""
             'predicted': f"Error: {str(e)}",
             'expected': example['result'],
             'operation': example['operation'],
-            'operation_type': example['operation_type'],
+            'operation_type': example.get('operation_type', 'unknown'),
             'error': str(e)
         }
 
-def calculate_similarity(predicted: str, expected: str, operation_type: str = "unknown") -> float:
+def run_modal_evaluation(model_names: List[str], dataset_file: str) -> Dict[str, Any]:
     """
-    Calculate similarity between predicted and expected results.
-    
-    Uses different strategies for state changes vs query operations
-    to handle filesystem output formatting differences.
+    Run evaluation using Modal for Qwen models.
     
     Args:
-        predicted: Predicted result string
-        expected: Expected result string
-        operation_type: Type of operation (state_change, query, etc.)
-        
+        model_names: List of Qwen model names to evaluate
+        dataset_file: Path to dataset file
+    
     Returns:
-        Similarity score between 0.0 and 1.0
+        Dictionary with evaluation results for all models
     """
-    if not predicted and not expected:
-        return 1.0
+    print(f"🚀 Running Modal evaluation for models: {', '.join(model_names)}")
     
-    if not predicted or not expected:
-        return 0.0
+    results = {}
     
-    # Try exact match first
-    if predicted.strip() == expected.strip():
-        return 1.0
-    
-    # Normalize whitespace and compare
-    pred_normalized = ' '.join(predicted.split())
-    exp_normalized = ' '.join(expected.split())
-    
-    if pred_normalized == exp_normalized:
-        return 1.0
-    
-    # For state changes, focus on structural similarity
-    if operation_type == "state_change":
-        return calculate_tree_similarity(predicted, expected)
-    
-    # For query operations, use more flexible comparison
-    elif operation_type == "query":
-        return calculate_content_similarity(predicted, expected)
-    
-    # Default: character-level similarity
-    pred_chars = set(pred_normalized.lower())
-    exp_chars = set(exp_normalized.lower())
-    
-    if not pred_chars and not exp_chars:
-        return 1.0
-    
-    intersection = len(pred_chars.intersection(exp_chars))
-    union = len(pred_chars.union(exp_chars))
-    
-    return intersection / union if union > 0 else 0.0
-
-def calculate_tree_similarity(predicted: str, expected: str) -> float:
-    """Calculate similarity for filesystem tree structures."""
-    # Extract filenames and structure, ignore minor differences
-    pred_files = extract_file_structure(predicted)
-    exp_files = extract_file_structure(expected)
-    
-    if not pred_files and not exp_files:
-        return 1.0
-    if not pred_files or not exp_files:
-        return 0.0
-    
-    # Compare file structures
-    from difflib import SequenceMatcher
-    matcher = SequenceMatcher(None, sorted(pred_files), sorted(exp_files))
-    return matcher.ratio()
-
-def calculate_content_similarity(predicted: str, expected: str) -> float:
-    """Calculate similarity for command output content."""
-    # For query results, focus on actual content rather than formatting
-    pred_lines = [line.strip() for line in predicted.split('\n') if line.strip()]
-    exp_lines = [line.strip() for line in expected.split('\n') if line.strip()]
-    
-    if not pred_lines and not exp_lines:
-        return 1.0
-    if not pred_lines or not exp_lines:
-        return 0.0
-    
-    from difflib import SequenceMatcher
-    matcher = SequenceMatcher(None, pred_lines, exp_lines)
-    return matcher.ratio()
-
-def extract_file_structure(tree_str: str) -> List[str]:
-    """Extract file/directory names from filesystem tree string."""
-    files = []
-    for line in tree_str.split('\n'):
-        if not line.strip():
-            continue
-        # Remove tree symbols and extract filename
-        cleaned = line
-        for prefix in ['├── ', '└── ', '│   ', '├──', '└──', '│']:
-            cleaned = cleaned.replace(prefix, '')
+    # Run evaluation for each model using modal run
+    for model_name in model_names:
+        print(f"🔥 Evaluating {model_name} via Modal...")
         
-        parts = cleaned.strip().split()
-        if parts and not parts[0].startswith('/'):
-            files.append(parts[0])
-    
-    return files
-
-def evaluate_batch(examples: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """
-    Evaluate a batch of examples.
-    
-    Args:
-        examples: List of training examples
-        
-    Returns:
-        List of evaluation results
-    """
-    results = []
-    for i, example in enumerate(examples):
-        print(f"Evaluating example {i+1}/{len(examples)}")
-        result = evaluate_single_example(example)
-        results.append(result)
+        try:
+            # Use modal run to evaluate single model
+            cmd = ['modal', 'run', 'modal_run.py::eval_single_size', '--model-name', model_name]
+            print(f"Running: {' '.join(cmd)}")
+            
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)  # 30 min timeout
+            
+            if result.returncode == 0:
+                # Try to parse the output for results
+                # Modal functions typically print results to stdout
+                output_lines = result.stdout.strip().split('\n')
+                
+                # Look for accuracy information in the output
+                accuracy = 0.0
+                total_examples = 0
+                correct_predictions = 0
+                
+                for line in output_lines:
+                    if 'accuracy' in line.lower() and '%' in line:
+                        try:
+                            # Extract percentage from line like "✅ qwen3-1.7b: 75.0% accuracy"
+                            import re
+                            match = re.search(r'(\d+\.?\d*)%', line)
+                            if match:
+                                accuracy = float(match.group(1)) / 100.0
+                        except:
+                            pass
+                    elif 'correct:' in line.lower():
+                        try:
+                            # Extract numbers from line like "Correct: 6/8"
+                            import re
+                            match = re.search(r'(\d+)/(\d+)', line)
+                            if match:
+                                correct_predictions = int(match.group(1))
+                                total_examples = int(match.group(2))
+                        except:
+                            pass
+                
+                results[model_name] = {
+                    'model_name': model_name,
+                    'total_examples': total_examples,
+                    'correct_predictions': correct_predictions,
+                    'overall_accuracy': accuracy,
+                    'accuracy_by_type': {},
+                    'detailed_results': [],
+                    'modal_output': result.stdout
+                }
+                
+                print(f"✅ {model_name}: {accuracy:.2%} accuracy ({correct_predictions}/{total_examples})")
+                
+            else:
+                error_msg = f"Modal run failed: {result.stderr}"
+                print(f"❌ {model_name}: {error_msg}")
+                results[model_name] = {
+                    'model_name': model_name,
+                    'error': error_msg,
+                    'overall_accuracy': 0.0,
+                    'modal_stdout': result.stdout,
+                    'modal_stderr': result.stderr
+                }
+                
+        except subprocess.TimeoutExpired:
+            error_msg = "Modal evaluation timed out (30 minutes)"
+            print(f"❌ {model_name}: {error_msg}")
+            results[model_name] = {
+                'model_name': model_name,
+                'error': error_msg,
+                'overall_accuracy': 0.0
+            }
+            
+        except Exception as e:
+            error_msg = f"Modal evaluation failed: {str(e)}"
+            print(f"❌ {model_name}: {error_msg}")
+            results[model_name] = {
+                'model_name': model_name,
+                'error': error_msg,
+                'overall_accuracy': 0.0
+            }
     
     return results
 
-def calculate_statistics(results: List[Dict[str, Any]]) -> Dict[str, Any]:
+def evaluate_dataset_unified(
+    dataset_file: str,
+    models: List[str], 
+    output_file: str,
+    max_examples: int = MAX_EXAMPLES_DEFAULT
+) -> Dict[str, Any]:
     """
-    Calculate evaluation statistics from results.
+    Unified evaluation function that handles both local and Modal models.
     
     Args:
-        results: List of evaluation results
+        dataset_file: Path to dataset file  
+        models: List of model names to evaluate
+        output_file: Path to save evaluation results
+        max_examples: Maximum number of examples to evaluate
         
     Returns:
-        Dictionary with statistics
+        Dictionary with evaluation statistics for all models
     """
+    print(f"🎯 Starting unified evaluation")
+    print(f"📂 Dataset: {dataset_file}")
+    print(f"🤖 Models: {', '.join(models)}")
+    print(f"📊 Max examples: {max_examples}")
+    print("=" * 60)
+    
+    # Load dataset
+    examples = load_dataset(dataset_file)
+    if not examples:
+        print(f"❌ Failed to load dataset from {dataset_file}")
+        return {}
+    
+    # Limit number of examples
+    if len(examples) > max_examples:
+        print(f"📋 Limiting evaluation to {max_examples} examples (out of {len(examples)})")
+        examples = examples[:max_examples]
+    
+    print(f"📊 Evaluating {len(examples)} examples")
+    
+    # Separate models by type
+    local_models = [m for m in models if m in GEMINI_MODELS]
+    qwen_models = [m for m in models if m in QWEN_MODELS]
+    
+    all_results = {}
+    
+    # Evaluate local models (Gemini)
+    for model_name in local_models:
+        print(f"\n🔥 Evaluating {model_name} (local)...")
+        model_results = []
+        
+        for i, example in enumerate(examples):
+            if i % 10 == 0:
+                print(f"  Progress: {i}/{len(examples)}")
+            
+            result = evaluate_single_example_local(example, model_name)
+            model_results.append(result)
+        
+        # Calculate statistics
+        stats = calculate_statistics(model_results)
+        all_results[model_name] = {
+            'model_name': model_name,
+            'statistics': stats,
+            'detailed_results': model_results,
+            'evaluation_method': 'local_api'
+        }
+        
+        print(f"✅ {model_name}: {stats['overall_accuracy']:.2%} accuracy")
+    
+    # Evaluate Qwen models via Modal
+    if qwen_models:
+        print(f"\n🚀 Evaluating Qwen models via Modal...")
+        modal_results = run_modal_evaluation(qwen_models, dataset_file)
+        
+        for model_name in qwen_models:
+            if model_name in modal_results:
+                result = modal_results[model_name]
+                if 'error' not in result:
+                    all_results[model_name] = {
+                        'model_name': model_name,
+                        'statistics': {
+                            'total_examples': result.get('total_examples', 0),
+                            'correct_predictions': result.get('correct_predictions', 0),
+                            'overall_accuracy': result.get('overall_accuracy', 0.0),
+                            'accuracy_by_type': result.get('accuracy_by_type', {}),
+                        },
+                        'detailed_results': result.get('detailed_results', []),
+                        'evaluation_method': 'modal_vllm'
+                    }
+                    print(f"✅ {model_name}: {result.get('overall_accuracy', 0.0):.2%} accuracy")
+                else:
+                    print(f"❌ {model_name}: {result['error']}")
+                    all_results[model_name] = {
+                        'model_name': model_name,
+                        'error': result['error'],
+                        'evaluation_method': 'modal_vllm'
+                    }
+    
+    # Save comprehensive results
+    output_data = {
+        'evaluation_info': {
+            'dataset_file': dataset_file,
+            'models_evaluated': models,
+            'total_examples_in_dataset': len(examples),
+            'examples_evaluated': max_examples,
+            'timestamp': time.time()
+        },
+        'model_results': all_results
+    }
+    
+    print(f"\n💾 Saving results to {output_file}")
+    with open(output_file, 'w') as f:
+        json.dump(output_data, f, indent=2)
+    
+    # Print summary
+    print("\n" + "="*60)
+    print("🎉 UNIFIED EVALUATION SUMMARY")
+    print("="*60)
+    
+    for model_name, result in all_results.items():
+        if 'error' in result:
+            print(f"❌ {model_name}: ERROR - {result['error']}")
+        else:
+            stats = result.get('statistics', {})
+            accuracy = stats.get('overall_accuracy', 0.0)
+            correct = stats.get('correct_predictions', 0)
+            total = stats.get('total_examples', 0)
+            method = result.get('evaluation_method', 'unknown')
+            print(f"✅ {model_name} ({method}): {accuracy:.2%} accuracy ({correct}/{total})")
+    
+    return all_results
+
+def calculate_statistics(results: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Calculate evaluation statistics from results."""
     if not results:
         return {}
     
     total = len(results)
-    correct = sum(1 for r in results if r['correct'])
+    correct = sum(1 for r in results if r.get('correct', False))
+    accuracy = correct / total if total > 0 else 0.0
     
     # Statistics by operation type
     by_type = defaultdict(list)
+    by_operation = defaultdict(list)
+    
     for result in results:
-        by_type[result['operation_type']].append(result)
+        op_type = result.get('operation_type', 'unknown')
+        operation = result.get('operation', 'unknown')
+        by_type[op_type].append(result)
+        by_operation[operation].append(result)
     
     type_stats = {}
     for op_type, type_results in by_type.items():
-        type_correct = sum(1 for r in type_results if r['correct'])
+        type_correct = sum(1 for r in type_results if r.get('correct', False))
         type_stats[op_type] = {
             'total': len(type_results),
             'correct': type_correct,
             'accuracy': type_correct / len(type_results) if type_results else 0.0
         }
     
-    # Statistics by operation name
-    by_operation = defaultdict(list)
-    for result in results:
-        op_name = result['operation'].split('(')[0].strip()
-        if op_name.startswith('FUSE '):
-            op_name = op_name[5:]
-        by_operation[op_name].append(result)
-    
     operation_stats = {}
-    for op_name, op_results in by_operation.items():
-        op_correct = sum(1 for r in op_results if r['correct'])
-        operation_stats[op_name] = {
+    for operation, op_results in by_operation.items():
+        op_correct = sum(1 for r in op_results if r.get('correct', False))
+        operation_stats[operation] = {
             'total': len(op_results),
             'correct': op_correct,
             'accuracy': op_correct / len(op_results) if op_results else 0.0
         }
     
+    # Error examples
+    error_examples = [r for r in results if not r.get('correct', False)][:5]
+    
     return {
         'total_examples': total,
         'correct_predictions': correct,
-        'overall_accuracy': correct / total,
+        'overall_accuracy': accuracy,
         'accuracy_by_type': type_stats,
         'accuracy_by_operation': operation_stats,
-        'error_examples': [r for r in results if not r['correct']][:5]  # First 5 errors
+        'error_examples': error_examples
     }
-
-def evaluate_dataset(
-    dataset_file: str, 
-    output_file: str, 
-    max_examples: int = MAX_EXAMPLES_DEFAULT
-) -> Dict[str, Any]:
-    """
-    Evaluate the LLM on a dataset of filesystem operations.
-    
-    Args:
-        dataset_file: Path to JSON file with training examples
-        output_file: Path to save evaluation results
-        max_examples: Maximum number of examples to evaluate
-        
-    Returns:
-        Dictionary with evaluation statistics
-    """
-    print(f"Loading dataset from {dataset_file}")
-    
-    examples = load_dataset(dataset_file)
-    if not examples:
-        print(f"Failed to load dataset from {dataset_file}")
-        return {}
-    
-    if not examples:
-        print("No examples found in dataset")
-        return {}
-    
-    # Limit number of examples
-    if len(examples) > max_examples:
-        print(f"Limiting evaluation to {max_examples} examples (out of {len(examples)})")
-        examples = examples[:max_examples]
-    
-    print(f"Evaluating {len(examples)} examples using LLM-driven FUSE filesystem")
-    
-    # Evaluate in batches
-    all_results = []
-    batch_size = DEFAULT_BATCH_SIZE
-    
-    for i in range(0, len(examples), batch_size):
-        batch = examples[i:i + batch_size]
-        print(f"Processing batch {i//batch_size + 1}/{(len(examples) + batch_size - 1)//batch_size}")
-        
-        batch_results = evaluate_batch(batch)
-        all_results.extend(batch_results)
-    
-    # Calculate statistics
-    stats = calculate_statistics(all_results)
-    
-    # Save results
-    output_data = {
-        'statistics': stats,
-        'detailed_results': all_results,
-        'evaluation_info': {
-            'dataset_file': dataset_file,
-            'total_examples_in_dataset': len(examples),
-            'examples_evaluated': len(all_results),
-            'evaluation_method': 'llm_fuse_filesystem'
-        }
-    }
-    
-    print(f"Saving results to {output_file}")
-    with open(output_file, 'w') as f:
-        json.dump(output_data, f, indent=2)
-    
-    # Print summary
-    print("\n" + "="*50)
-    print("EVALUATION SUMMARY")
-    print("="*50)
-    print(f"Total examples: {stats['total_examples']}")
-    print(f"Correct predictions: {stats['correct_predictions']}")
-    print(f"Overall accuracy: {stats['overall_accuracy']:.2%}")
-    
-    print("\nAccuracy by operation type:")
-    for op_type, type_stats in stats['accuracy_by_type'].items():
-        print(f"  {op_type}: {type_stats['accuracy']:.2%} ({type_stats['correct']}/{type_stats['total']})")
-    
-    print("\nAccuracy by operation:")
-    for op_name, op_stats in stats['accuracy_by_operation'].items():
-        print(f"  {op_name}: {op_stats['accuracy']:.2%} ({op_stats['correct']}/{op_stats['total']})")
-    
-    if stats['error_examples']:
-        print(f"\nFirst few error examples:")
-        for i, error in enumerate(stats['error_examples'][:3]):
-            print(f"  {i+1}. Operation: {error['operation']}")
-            print(f"     Expected: {error['expected'][:100]}...")
-            print(f"     Predicted: {error['predicted'][:100]}...")
-            if 'error' in error:
-                print(f"     Error: {error['error']}")
-    
-    return stats
 
 def load_hf_format(file_path: str) -> List[Dict[str, str]]:
-    """
-    Load HuggingFace JSONL format data.
-    
-    Args:
-        file_path: Path to JSONL file
-        
-    Returns:
-        List of HuggingFace format examples
-    """
+    """Load HuggingFace JSONL format data."""
     examples = []
     with open(file_path, 'r') as f:
         for line in f:
@@ -532,15 +551,7 @@ def load_hf_format(file_path: str) -> List[Dict[str, str]]:
     return examples
 
 def convert_hf_to_structured(hf_examples: List[Dict[str, str]]) -> List[Dict[str, Any]]:
-    """
-    Convert HuggingFace format back to structured format for evaluation.
-    
-    Args:
-        hf_examples: List of HuggingFace format examples
-        
-    Returns:
-        List of structured examples
-    """
+    """Convert HuggingFace format to structured format for evaluation."""
     structured_examples = []
     
     for hf_example in hf_examples:
@@ -579,16 +590,14 @@ def convert_hf_to_structured(hf_examples: List[Dict[str, str]]) -> List[Dict[str
         
         # Determine operation type based on operation name
         operation_type = "state_change"  # Default assumption
-        if any(op in operation.lower() for op in ['readdir', 'stat', 'ls']):
+        if any(op in operation.lower() for op in ['readdir', 'stat', 'ls', 'getattr']):
             operation_type = "query"
         
         structured_example = {
             'initial_state': initial_state,
             'operation': operation,
             'result': completion,
-            'operation_type': operation_type,
-            'shell_command': '',  # Not available from HF format
-            'fuse_operations': []  # Not available from HF format
+            'operation_type': operation_type
         }
         
         structured_examples.append(structured_example)
@@ -596,38 +605,175 @@ def convert_hf_to_structured(hf_examples: List[Dict[str, str]]) -> List[Dict[str
     return structured_examples
 
 def load_dataset(file_path: str) -> List[Dict[str, Any]]:
-    """
-    Load dataset in either structured JSON or HuggingFace JSONL format.
-    
-    Args:
-        file_path: Path to dataset file
-        
-    Returns:
-        List of structured examples
-    """
+    """Load dataset in either structured JSON or HuggingFace JSONL format."""
     try:
         if file_path.endswith('.jsonl'):
             # Assume HuggingFace format
-            print("Detected HuggingFace JSONL format")
+            print("📋 Detected HuggingFace JSONL format")
             hf_examples = load_hf_format(file_path)
             return convert_hf_to_structured(hf_examples)
         else:
             # Assume structured JSON format
-            print("Detected structured JSON format")
+            print("📋 Detected structured JSON format")
             with open(file_path, 'r') as f:
                 examples = json.load(f)
             return examples
     except Exception as e:
-        print(f"Error loading dataset: {e}")
+        print(f"❌ Error loading dataset: {e}")
         return []
 
-if __name__ == "__main__":
-    # Example usage
-    dataset_file = "data/training_data_linux.json"
-    output_file = "data/eval_results_fuse.json"
+def run_modal_analysis(results_filename: str) -> int:
+    """
+    Run Modal analysis on evaluation results.
     
-    if os.path.exists(dataset_file):
-        evaluate_dataset(dataset_file, output_file, max_examples=20)
+    Args:
+        results_filename: Name of the results file to analyze
+        
+    Returns:
+        Exit code (0 for success, 1 for failure)
+    """
+    print(f"🔍 Running Modal analysis on {results_filename}")
+    
+    try:
+        # Use modal run to analyze results (same as your original command)
+        cmd = ['modal', 'run', 'modal_run.py::analyze_eval_results', '--results-filename', results_filename]
+        print(f"Running: {' '.join(cmd)}")
+        
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)  # 10 min timeout
+        
+        if result.returncode == 0:
+            print("🎉 Modal analysis complete!")
+            print(result.stdout)
+            return 0
+        else:
+            print(f"❌ Modal analysis failed:")
+            print(f"STDOUT: {result.stdout}")
+            print(f"STDERR: {result.stderr}")
+            return 1
+            
+    except subprocess.TimeoutExpired:
+        print(f"❌ Modal analysis timed out (10 minutes)")
+        return 1
+        
+    except Exception as e:
+        print(f"❌ Modal analysis setup failed: {str(e)}")
+        return 1
+
+def main():
+    """Main CLI entry point."""
+    parser = argparse.ArgumentParser(
+        description="Unified LLM evaluation for FUSE filesystem operations",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Evaluate Gemini and Qwen models
+  python -m src.eval --data data/fs_data.jsonl --models gemini,qwen3-1.7b,qwen3-4b
+  
+  # Evaluate only Gemini with custom output
+  python -m src.eval --data data/fs_data.jsonl --models gemini --output gemini_results.json
+  
+  # Evaluate multiple Qwen models via Modal
+  python -m src.eval --data data/fs_data.jsonl --models qwen3-8b,qwen3-14b --max-examples 200
+  
+  # Analyze existing evaluation results via Modal
+  python -m src.eval --analyze-results qwen3_eval_results_1749927278.json
+        """
+    )
+    
+    # Create mutually exclusive group for main actions
+    action_group = parser.add_mutually_exclusive_group(required=True)
+    
+    action_group.add_argument(
+        '--data', 
+        help='Path to dataset file (JSON or JSONL format) - for evaluation mode'
+    )
+    
+    action_group.add_argument(
+        '--analyze-results',
+        metavar='RESULTS_FILE',
+        help='Analyze existing evaluation results via Modal (e.g., qwen3_eval_results_1749927278.json)'
+    )
+    
+    parser.add_argument(
+        '--models', 
+        help='Comma-separated list of models to evaluate (required for evaluation mode)'
+    )
+    
+    parser.add_argument(
+        '--output',
+        default='eval_results.json',
+        help='Output file for results (default: eval_results.json) - evaluation mode only'
+    )
+    
+    parser.add_argument(
+        '--max-examples',
+        type=int,
+        default=MAX_EXAMPLES_DEFAULT,
+        help=f'Maximum number of examples to evaluate (default: {MAX_EXAMPLES_DEFAULT}) - evaluation mode only'
+    )
+    
+    args = parser.parse_args()
+    
+    # Handle analysis mode
+    if args.analyze_results:
+        return run_modal_analysis(args.analyze_results)
+    
+    # Handle evaluation mode
+    if not args.data:
+        print("❌ --data is required for evaluation mode")
+        return 1
+    
+    if not args.models:
+        print("❌ --models is required for evaluation mode")
+        return 1
+    
+    # Validate inputs
+    if not os.path.exists(args.data):
+        print(f"❌ Dataset file not found: {args.data}")
+        return 1
+    
+    # Parse models
+    models = [m.strip() for m in args.models.split(',') if m.strip()]
+    if not models:
+        print("❌ No models specified")
+        return 1
+    
+    # Validate models
+    invalid_models = []
+    for model in models:
+        if model not in GEMINI_MODELS and model not in QWEN_MODELS:
+            invalid_models.append(model)
+    
+    if invalid_models:
+        print(f"❌ Invalid models: {', '.join(invalid_models)}")
+        print(f"✅ Supported models:")
+        print(f"   Gemini: {', '.join(GEMINI_MODELS)}")
+        print(f"   Qwen (via Modal): {', '.join(QWEN_MODELS)}")
+        return 1
+    
+    # Check API key for Gemini models
+    if any(m in GEMINI_MODELS for m in models):
+        if not os.environ.get('GEMINI_API_KEY'):
+            print("❌ GEMINI_API_KEY environment variable not set")
+            print("   Required for Gemini model evaluation")
+            return 1
+    
+    print("🚀 Starting unified evaluation pipeline...")
+    
+    # Run evaluation
+    results = evaluate_dataset_unified(
+        dataset_file=args.data,
+        models=models,
+        output_file=args.output,
+        max_examples=args.max_examples
+    )
+    
+    if results:
+        print(f"\n🎉 Evaluation complete! Results saved to {args.output}")
+        return 0
     else:
-        print(f"Dataset file not found: {dataset_file}")
-        print("Please generate training data first using generate_data.py") 
+        print("\n❌ Evaluation failed")
+        return 1
+
+if __name__ == "__main__":
+    sys.exit(main()) 
