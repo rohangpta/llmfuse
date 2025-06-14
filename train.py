@@ -29,8 +29,8 @@ def setup_distributed():
     print(f"Rank {os.environ.get('RANK', 0)} using GPU {torch.cuda.current_device()}")
 
 
-def load_training_data():
-    """Load and format training data."""
+def load_training_data(train_split=0.9, output_dir="/root/output_models"):
+    """Load and format training data with train/test split."""
     training_data_path = "/root/training_data.jsonl"
 
     if not os.path.exists(training_data_path):
@@ -44,8 +44,30 @@ def load_training_data():
             if line.strip():
                 examples.append(json.loads(line.strip()))
 
-    print(f"✅ Loaded {len(examples)} training examples")
-    return Dataset.from_list(examples)
+    print(f"✅ Loaded {len(examples)} total examples")
+
+    # Split into train/test
+    import random
+
+    random.seed(42)  # For reproducible splits
+    random.shuffle(examples)
+
+    split_idx = int(len(examples) * train_split)
+    train_examples = examples[:split_idx]
+    test_examples = examples[split_idx:]
+
+    print(
+        f"📊 Split: {len(train_examples)} train, {len(test_examples)} test ({train_split:.0%}/{1 - train_split:.0%})"
+    )
+
+    # Save test set for later evaluation (to the output volume)
+    test_data_path = f"{output_dir}/../test_data.jsonl"
+    with open(test_data_path, "w") as f:
+        for example in test_examples:
+            f.write(json.dumps(example) + "\n")
+    print(f"💾 Saved test set to {test_data_path}")
+
+    return Dataset.from_list(train_examples)
 
 
 def main():
@@ -99,7 +121,7 @@ def main():
 
     # Load training data
     print("📁 Loading training data...")
-    dataset = load_training_data()
+    dataset = load_training_data(output_dir=args.output_dir)
     print(f"📊 Dataset size: {len(dataset)}")
 
     # Load tokenizer

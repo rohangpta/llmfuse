@@ -65,7 +65,7 @@ training_image = (
             "TOKENIZERS_PARALLELISM": "false",
         }
     )
-    .add_local_file("data/training_data_100.jsonl", "/root/training_data.jsonl")
+    .add_local_file("data/training_data_1000.jsonl", "/root/training_data.jsonl")
     .add_local_file("train.py", "/root/train.py")
 )
 
@@ -261,6 +261,209 @@ def train_qwen(
     except Exception as e:
         print(f"❌ Training failed: {e}")
         raise
+
+
+@app.function(
+    image=training_image,
+    gpu="H100",
+    volumes={
+        MODEL_CACHE_PATH: model_cache,
+        OUTPUT_MODEL_PATH: trained_models_volume,
+    },
+    timeout=30 * 60,  # 30 minutes for test evaluation
+    secrets=[modal.Secret.from_name("huggingface-secret")],
+)
+def eval_trained_model_on_test_set(model_path: str):
+    """
+    Evaluate the trained model on the held-out test set (10% of data).
+
+    Args:
+        model_path: Path to the trained model (e.g., "qwen3-4b-sft-3epochs-distributed")
+    """
+    import sys
+    import os
+    import json
+    from datetime import datetime
+
+    print(f"🧪 Evaluating trained model on test set: {model_path}")
+
+    full_model_path = f"{OUTPUT_MODEL_PATH}/{model_path}"
+    test_data_path = f"{OUTPUT_MODEL_PATH}/test_data.jsonl"  # Saved during training
+
+    if not os.path.exists(full_model_path):
+        raise ValueError(f"Trained model not found at: {full_model_path}")
+
+    if not os.path.exists(test_data_path):
+        raise ValueError(
+            f"Test data not found at: {test_data_path}. Make sure you trained with the split dataset."
+        )
+
+    # Load test data
+    test_examples = []
+    with open(test_data_path, "r") as f:
+        for line in f:
+            if line.strip():
+                test_examples.append(json.loads(line.strip()))
+
+    print(f"📊 Loaded {len(test_examples)} test examples")
+
+    # Set up the model for evaluation
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+    import torch
+
+    print("🔤 Loading tokenizer and model...")
+    tokenizer = AutoTokenizer.from_pretrained(full_model_path)
+    model = AutoModelForCausalLM.from_pretrained(
+        full_model_path, torch_dtype=torch.bfloat16, device_map="auto"
+    )
+    model.eval()
+
+    # Evaluate each test example
+    results = []
+    correct = 0
+
+    for i, example in enumerate(test_examples):
+        if (i + 1) % 10 == 0:
+            print(f"Progress: {i + 1}/{len(test_examples)}")
+
+        # Create prompt
+        prompt = example["prompt"]
+        expected = example["completion"]
+
+        try:
+            # Format as chat
+            messages = [{"role": "user", "content": prompt}]
+            formatted_prompt = tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
+            )
+
+            # Tokenize
+            inputs = tokenizer(
+                formatted_prompt, return_tensors="pt", truncation=True, max_length=2048
+            ).to(model.device)
+
+            # Generate
+            with torch.no_grad():
+                outputs = model.generate(
+                    **inputs,
+                    max_new_tokens=512,
+                    temperature=0.0,  # Deterministic for evaluation
+                    do_sample=False,
+                    pad_token_id=tokenizer.eos_token_id,
+                )
+
+            # Decode response
+            predicted = tokenizer.decode(
+                outputs[0][len(inputs.input_ids[0]) :], skip_special_tokens=True
+            ).strip()
+
+            # Simple similarity check (you can make this more sophisticated)
+            similarity = calculate_simple_similarity(predicted, expected)
+            is_correct = similarity > 0.7
+
+            if is_correct:
+                correct += 1
+
+            results.append(
+                {
+                    "prompt": prompt,
+                    "expected": expected,
+                    "predicted": predicted,
+                    "similarity": similarity,
+                    "correct": is_correct,
+                }
+            )
+
+        except Exception as e:
+            print(f"Error evaluating example {i}: {e}")
+            results.append(
+                {
+                    "prompt": prompt,
+                    "expected": expected,
+                    "predicted": f"Error: {str(e)}",
+                    "similarity": 0.0,
+                    "correct": False,
+                }
+            )
+
+    # Calculate final metrics
+    accuracy = correct / len(test_examples)
+    avg_similarity = sum(r["similarity"] for r in results) / len(results)
+
+    # Save results
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    results_filename = f"test_eval_{model_path.replace('/', '_')}_{timestamp}.json"
+    results_path = f"{OUTPUT_MODEL_PATH}/{results_filename}"
+
+    eval_results = {
+        "model_path": model_path,
+        "test_examples": len(test_examples),
+        "correct_predictions": correct,
+        "accuracy": accuracy,
+        "average_similarity": avg_similarity,
+        "detailed_results": results,
+    }
+
+    with open(results_path, "w") as f:
+        json.dump(eval_results, f, indent=2)
+
+    # Commit results to volume
+    trained_models_volume.commit()
+
+    # Print summary
+    print("\n" + "=" * 60)
+    print("🎯 TEST SET EVALUATION RESULTS")
+    print("=" * 60)
+    print(f"📦 Model: {model_path}")
+    print(f"📊 Test examples: {len(test_examples)}")
+    print(f"✅ Correct predictions: {correct}")
+    print(f"🎯 Test accuracy: {accuracy:.1%}")
+    print(f"📈 Average similarity: {avg_similarity:.3f}")
+
+    # Show some failures
+    failures = [r for r in results if not r["correct"]]
+    if failures:
+        print(f"\n❌ Example failures (showing first 3 of {len(failures)}):")
+        for i, failure in enumerate(failures[:3]):
+            print(f"  {i + 1}. Expected: {failure['expected'][:100]}...")
+            print(f"     Predicted: {failure['predicted'][:100]}...")
+            print(f"     Similarity: {failure['similarity']:.3f}")
+
+    print(f"\n💾 Detailed results saved to: {results_filename}")
+
+    return eval_results
+
+
+def calculate_simple_similarity(predicted: str, expected: str) -> float:
+    """Simple similarity calculation for evaluation."""
+    if not predicted and not expected:
+        return 1.0
+
+    if not predicted or not expected:
+        return 0.0
+
+    # Try exact match first
+    if predicted.strip() == expected.strip():
+        return 1.0
+
+    # Normalize whitespace and compare
+    pred_normalized = " ".join(predicted.split())
+    exp_normalized = " ".join(expected.split())
+
+    if pred_normalized == exp_normalized:
+        return 1.0
+
+    # Character-level similarity as fallback
+    pred_chars = set(pred_normalized.lower())
+    exp_chars = set(exp_normalized.lower())
+
+    if not pred_chars and not exp_chars:
+        return 1.0
+
+    intersection = len(pred_chars.intersection(exp_chars))
+    union = len(pred_chars.union(exp_chars))
+
+    return intersection / union if union > 0 else 0.0
 
 
 @app.function(
@@ -691,6 +894,116 @@ def evaluate_dataset(examples: List[Dict[str, Any]], max_examples: int = 50) -> 
     return results
 
 
+@app.function(
+    image=training_image,
+    volumes={
+        OUTPUT_MODEL_PATH: trained_models_volume,
+    },
+    timeout=10 * 60,  # 10 minutes
+    secrets=[modal.Secret.from_name("huggingface-secret")],
+)
+def create_test_split():
+    """
+    Manually create the 90/10 train/test split and save test data.
+    Use this if you need to create the test split without retraining.
+    """
+    import json
+    import random
+    import os
+
+    print("📊 Creating 90/10 train/test split...")
+
+    # Load the full dataset
+    training_data_path = "/root/training_data.jsonl"
+
+    if not os.path.exists(training_data_path):
+        raise FileNotFoundError(
+            "Training data not found. The data should be baked into the image."
+        )
+
+    examples = []
+    with open(training_data_path, "r") as f:
+        for line in f:
+            if line.strip():
+                examples.append(json.loads(line.strip()))
+
+    print(f"✅ Loaded {len(examples)} total examples")
+
+    # Split into train/test
+    random.seed(42)  # Same seed as training
+    random.shuffle(examples)
+
+    train_split = 0.9
+    split_idx = int(len(examples) * train_split)
+    train_examples = examples[:split_idx]
+    test_examples = examples[split_idx:]
+
+    print(
+        f"📊 Split: {len(train_examples)} train, {len(test_examples)} test ({train_split:.0%}/{1 - train_split:.0%})"
+    )
+
+    # Save test set
+    test_data_path = f"{OUTPUT_MODEL_PATH}/test_data.jsonl"
+    with open(test_data_path, "w") as f:
+        for example in test_examples:
+            f.write(json.dumps(example) + "\n")
+
+    print(f"💾 Saved test set to {test_data_path}")
+
+    # Also save train set for reference
+    train_data_path = f"{OUTPUT_MODEL_PATH}/train_data.jsonl"
+    with open(train_data_path, "w") as f:
+        for example in train_examples:
+            f.write(json.dumps(example) + "\n")
+
+    print(f"💾 Saved train set to {train_data_path}")
+
+    # Commit to volume
+    trained_models_volume.commit()
+
+    print("✅ Train/test split created successfully!")
+
+    return {
+        "total_examples": len(examples),
+        "train_examples": len(train_examples),
+        "test_examples": len(test_examples),
+        "test_data_path": test_data_path,
+        "train_data_path": train_data_path,
+    }
+
+
+@app.function(
+    image=training_image,
+    volumes={
+        OUTPUT_MODEL_PATH: trained_models_volume,
+    },
+    timeout=5 * 60,  # 5 minutes
+)
+def list_volume_contents():
+    """List contents of the trained models volume for debugging."""
+    import os
+
+    print(f"📁 Contents of {OUTPUT_MODEL_PATH}:")
+
+    if not os.path.exists(OUTPUT_MODEL_PATH):
+        print(f"❌ Directory {OUTPUT_MODEL_PATH} does not exist!")
+        return []
+
+    contents = []
+    for root, dirs, files in os.walk(OUTPUT_MODEL_PATH):
+        level = root.replace(OUTPUT_MODEL_PATH, "").count(os.sep)
+        indent = " " * 2 * level
+        print(f"{indent}{os.path.basename(root)}/")
+        subindent = " " * 2 * (level + 1)
+        for file in files:
+            file_path = os.path.join(root, file)
+            file_size = os.path.getsize(file_path)
+            print(f"{subindent}{file} ({file_size} bytes)")
+            contents.append(file_path)
+
+    return contents
+
+
 @app.local_entrypoint()
 def main():
     """Local entrypoint showing available training functions."""
@@ -709,6 +1022,9 @@ def main():
     )
     print(
         "  modal run modal_train.py::eval_trained_model_comprehensive --model-path='qwen3-8b-sft-3epochs-distributed'  # Full eval"
+    )
+    print(
+        "  modal run modal_train.py::eval_trained_model_on_test_set --model-path='qwen3-8b-sft-3epochs-distributed'     # Test set eval"
     )
 
     print("\nDistributed training features:")
