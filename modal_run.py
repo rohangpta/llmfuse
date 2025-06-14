@@ -20,12 +20,16 @@ from typing import Dict, Any, List, Optional, Union
 # Define the Modal app
 app = modal.App("qwen3-vllm-testing")
 
-# Create Modal Volumes for caching
+# Create Modal Volumes for caching and results
 model_cache = modal.Volume.from_name("qwen3-model-cache", create_if_missing=True)
 vllm_cache = modal.Volume.from_name("qwen3-vllm-cache", create_if_missing=True)
+eval_results_volume = modal.Volume.from_name(
+    "qwen3-eval-results", create_if_missing=True
+)
 
 MODEL_CACHE_PATH = "/root/models"
 VLLM_CACHE_PATH = "/root/.cache/vllm"
+EVAL_RESULTS_PATH = "/root/eval_results"
 
 # Create the vLLM image with all dependencies
 vllm_image = (
@@ -910,7 +914,7 @@ def main():
         "  modal run modal_run.py::eval_sizes              # Evaluate all Qwen3 sizes on filesystem ops"
     )
     print(
-        "  modal run modal_run.py::analyze_eval_results --results-file='path/to/results.json'  # Analyze saved results"
+        "  modal run modal_run.py::analyze_eval_results --results-filename='qwen3_eval_results_1234567890.json'  # Analyze saved results"
     )
     print(
         "  modal run modal_run.py::download_model --model-name='qwen3-8b'  # Cache model"
@@ -1153,12 +1157,12 @@ Provide only the result as it would appear after the operation:"""
 
 @app.function(
     image=vllm_image,
-    gpu="A100-40GB",
+    gpu="H100",
     volumes={
         MODEL_CACHE_PATH: model_cache,
         VLLM_CACHE_PATH: vllm_cache,
     },
-    timeout=30 * MINUTES,  # 30 minutes per model
+    timeout=20 * MINUTES,  # 20 minutes per model (faster with H100)
     secrets=[
         modal.Secret.from_name("gemini-api-key"),
         modal.Secret.from_name("huggingface-secret"),
@@ -1211,7 +1215,8 @@ async def eval_single_size(model_name: str) -> Dict[str, Any]:
 
 @app.function(
     image=vllm_image,
-    timeout=60 * MINUTES,  # 1 hour total timeout
+    volumes={EVAL_RESULTS_PATH: eval_results_volume},
+    timeout=40 * MINUTES,  # 40 minutes total timeout (faster with H100s)
     secrets=[
         modal.Secret.from_name("gemini-api-key"),
         modal.Secret.from_name("huggingface-secret"),
@@ -1344,31 +1349,40 @@ async def eval_sizes():
         },
     }
 
-    # Save to JSON file
+    # Save to JSON file in persistent volume
     timestamp = int(time.time())
     output_filename = f"qwen3_eval_results_{timestamp}.json"
+    full_path = f"{EVAL_RESULTS_PATH}/{output_filename}"
 
-    with open(f"/tmp/{output_filename}", "w") as f:
+    with open(full_path, "w") as f:
         json.dump(output_data, f, indent=2)
 
-    print(f"\n💾 Detailed results saved to: /tmp/{output_filename}")
+    # Commit changes to the volume to make them persistent
+    eval_results_volume.commit()
+
+    print(f"\n💾 Detailed results saved to persistent volume: {full_path}")
     print(
         "   This file contains all predictions, expected outputs, and failure details"
     )
-    print("   You can download it from Modal for detailed analysis")
+    print(f"   Use analyze_eval_results('{output_filename}') to inspect failures later")
+    print(f"   Or download from Modal volume: qwen3-eval-results")
 
     return all_results
 
 
 @app.function(
     image=vllm_image,
+    volumes={EVAL_RESULTS_PATH: eval_results_volume},
     timeout=10 * MINUTES,
 )
-def analyze_eval_results(results_file: str):
+def analyze_eval_results(results_filename: str):
     """Analyze saved evaluation results and show detailed failure analysis."""
 
     print("🔍 ANALYZING EVALUATION RESULTS")
     print("=" * 50)
+
+    # Construct full path from filename
+    results_file = f"{EVAL_RESULTS_PATH}/{results_filename}"
 
     try:
         with open(results_file, "r") as f:
