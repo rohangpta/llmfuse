@@ -73,6 +73,9 @@ class LLMFS(LoggingMixIn, Operations):
         """Parse filesystem state from tree format string."""
         self.fs_state.state = {}
         
+        if not state_str or not state_str.strip():
+            return
+        
         lines = state_str.strip().split('\n')
         
         for line in lines:
@@ -83,9 +86,10 @@ class LLMFS(LoggingMixIn, Operations):
             if line.strip().startswith('/') and 'dir' in line:
                 continue
                 
-            # Extract filename from tree prefixes
+            # Extract filename from tree prefixes more robustly
             cleaned = line
-            for prefix in ['├── ', '└── ', '│   ']:
+            tree_prefixes = ['├── ', '└── ', '│   ', '├──', '└──', '│']
+            for prefix in tree_prefixes:
                 cleaned = cleaned.replace(prefix, '')
             
             # Split the line to extract filename and metadata
@@ -94,7 +98,7 @@ class LLMFS(LoggingMixIn, Operations):
                 continue
                 
             filename = parts[0]
-            if not filename or filename in ['.', '..']:
+            if not filename or filename in ['.', '..'] or filename.startswith('/'):
                 continue
             
             # Determine if it's a directory or file
@@ -104,19 +108,35 @@ class LLMFS(LoggingMixIn, Operations):
             mode = 0o755 if is_dir else 0o644
             if len(parts) > 2:
                 try:
-                    mode = int(parts[2], 8)
+                    # Handle both octal strings and plain numbers
+                    mode_str = parts[2]
+                    if mode_str.startswith('0o'):
+                        mode = int(mode_str, 8)
+                    else:
+                        mode = int(mode_str, 8)
                 except (ValueError, IndexError):
                     pass
+            
+            # Extract size if available
+            size = 0
+            for i, part in enumerate(parts):
+                if part.endswith('B') and i > 0:
+                    try:
+                        size_str = part[:-1]  # Remove 'B'
+                        size = int(size_str) if size_str.isdigit() else 0
+                    except (ValueError, IndexError):
+                        pass
+                    break
             
             # Create FileEntry
             entry = FileEntry(
                 name=filename,
                 is_dir=is_dir,
                 mode=mode,
-                owner="user",
-                group="user", 
+                owner="root",  # Use root instead of user for consistency
+                group="root", 
                 mtime=time(),
-                size=0
+                size=size
             )
             
             # Store with filename as key (simplified - assumes flat structure)
@@ -137,15 +157,21 @@ class LLMFS(LoggingMixIn, Operations):
                     params_list.append(f"{key}={value}")
             params_str = ", " + ", ".join(params_list)
         
-        prompt = f"""You are a filesystem. Given the current state and an operation, return the new filesystem state.
+        prompt = f"""You are a filesystem. Given the current state and an operation, return EXACTLY the new filesystem state.
 
 Current filesystem state:
 {current_state}
 
 Operation: {operation}('{path}'{params_str})
 
-Return ONLY the new filesystem state as a tree structure. Use the same format as the input state.
-If the operation fails (e.g., file doesn't exist, permission denied), return the UNCHANGED filesystem state.
+CRITICAL REQUIREMENTS:
+- Return the COMPLETE filesystem tree in EXACT same format as input
+- Use root:root for ownership (not user:user)
+- Preserve exact timestamp format: "Jun 14 17:57"
+- Include file sizes (e.g., "36 B", "0 B")
+- Use exact tree symbols: ├── └── │
+- If operation fails (file doesn't exist, etc.), return UNCHANGED state
+- NO extra text, just the filesystem tree
 
 New filesystem state:"""
 

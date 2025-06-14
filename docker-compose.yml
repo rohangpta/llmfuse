@@ -61,29 +61,8 @@ services:
       - PYTHONPATH=/app
       - PYTHONUNBUFFERED=1
       - GEMINI_API_KEY=${GEMINI_API_KEY}
-    command: ["python", "-c", "from src.eval import evaluate_dataset; evaluate_dataset('/app/data/training_data_linux.json', '/app/data/eval_results_linux.json', max_examples=20)"]
+    command: ["python", "-c", "from src.eval import evaluate_dataset; evaluate_dataset('/app/data/training_data_sft.jsonl', '/app/data/eval_results_sft.json', max_examples=20)"]
     depends_on:
       - datagen
 
-  # FUSE-enabled evaluation service
-  eval-fuse:
-    build:
-      context: .
-      dockerfile: Dockerfile.datagen
-    privileged: true  # Required for FUSE
-    volumes:
-      - ./data:/app/data
-      - ./src:/app/src:ro
-    devices:
-      - /dev/fuse:/dev/fuse
-    cap_add:
-      - SYS_ADMIN
-    security_opt:
-      - apparmor:unconfined
-    environment:
-      - PYTHONPATH=/app
-      - PYTHONUNBUFFERED=1
-      - GEMINI_API_KEY=${GEMINI_API_KEY}
-    command: ["python", "-c", "from src.eval import evaluate_dataset; evaluate_dataset('/app/data/training_data_fuse.json', '/app/data/eval_results_fuse.json', max_examples=20)"]
-    depends_on:
-      - datagen-fuse
+

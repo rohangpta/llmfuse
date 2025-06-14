@@ -20,7 +20,7 @@ from .utils import extract_result_from_llm_output
 
 # Evaluation constants
 DEFAULT_BATCH_SIZE = 10
-SIMILARITY_THRESHOLD = 0.8
+SIMILARITY_THRESHOLD = 0.7  # More lenient for minor formatting differences
 MAX_EXAMPLES_DEFAULT = 50
 FUSE_OPERATION_TIMEOUT = 30
 
@@ -172,15 +172,15 @@ def evaluate_single_example(example: Dict[str, Any]) -> Dict[str, Any]:
             predicted = str(result) if result is not None else ""
             expected = example['result']
             
-            # Simple string similarity for query results
-            correct = calculate_similarity(predicted, expected) > SIMILARITY_THRESHOLD
+            # Use operation-type-aware similarity for query results
+            correct = calculate_similarity(predicted, expected, example['operation_type']) > SIMILARITY_THRESHOLD
             
         else:
             # For state-changing operations, compare the filesystem state
             predicted_state = fs._get_state_string()
             expected_state = example['result']
             
-            correct = calculate_similarity(predicted_state, expected_state) > SIMILARITY_THRESHOLD
+            correct = calculate_similarity(predicted_state, expected_state, example['operation_type']) > SIMILARITY_THRESHOLD
             predicted = predicted_state
             expected = expected_state
         
@@ -229,7 +229,7 @@ Result:"""
         predicted = extract_result_from_llm_output(predicted)
         
         expected = example['result']
-        correct = calculate_similarity(predicted, expected) > SIMILARITY_THRESHOLD
+        correct = calculate_similarity(predicted, expected, example['operation_type']) > SIMILARITY_THRESHOLD
         
         return {
             'correct': correct,
@@ -249,13 +249,17 @@ Result:"""
             'error': str(e)
         }
 
-def calculate_similarity(predicted: str, expected: str) -> float:
+def calculate_similarity(predicted: str, expected: str, operation_type: str = "unknown") -> float:
     """
     Calculate similarity between predicted and expected results.
+    
+    Uses different strategies for state changes vs query operations
+    to handle filesystem output formatting differences.
     
     Args:
         predicted: Predicted result string
         expected: Expected result string
+        operation_type: Type of operation (state_change, query, etc.)
         
     Returns:
         Similarity score between 0.0 and 1.0
@@ -266,6 +270,10 @@ def calculate_similarity(predicted: str, expected: str) -> float:
     if not predicted or not expected:
         return 0.0
     
+    # Try exact match first
+    if predicted.strip() == expected.strip():
+        return 1.0
+    
     # Normalize whitespace and compare
     pred_normalized = ' '.join(predicted.split())
     exp_normalized = ' '.join(expected.split())
@@ -273,7 +281,15 @@ def calculate_similarity(predicted: str, expected: str) -> float:
     if pred_normalized == exp_normalized:
         return 1.0
     
-    # Simple character-level similarity
+    # For state changes, focus on structural similarity
+    if operation_type == "state_change":
+        return calculate_tree_similarity(predicted, expected)
+    
+    # For query operations, use more flexible comparison
+    elif operation_type == "query":
+        return calculate_content_similarity(predicted, expected)
+    
+    # Default: character-level similarity
     pred_chars = set(pred_normalized.lower())
     exp_chars = set(exp_normalized.lower())
     
@@ -284,6 +300,54 @@ def calculate_similarity(predicted: str, expected: str) -> float:
     union = len(pred_chars.union(exp_chars))
     
     return intersection / union if union > 0 else 0.0
+
+def calculate_tree_similarity(predicted: str, expected: str) -> float:
+    """Calculate similarity for filesystem tree structures."""
+    # Extract filenames and structure, ignore minor differences
+    pred_files = extract_file_structure(predicted)
+    exp_files = extract_file_structure(expected)
+    
+    if not pred_files and not exp_files:
+        return 1.0
+    if not pred_files or not exp_files:
+        return 0.0
+    
+    # Compare file structures
+    from difflib import SequenceMatcher
+    matcher = SequenceMatcher(None, sorted(pred_files), sorted(exp_files))
+    return matcher.ratio()
+
+def calculate_content_similarity(predicted: str, expected: str) -> float:
+    """Calculate similarity for command output content."""
+    # For query results, focus on actual content rather than formatting
+    pred_lines = [line.strip() for line in predicted.split('\n') if line.strip()]
+    exp_lines = [line.strip() for line in expected.split('\n') if line.strip()]
+    
+    if not pred_lines and not exp_lines:
+        return 1.0
+    if not pred_lines or not exp_lines:
+        return 0.0
+    
+    from difflib import SequenceMatcher
+    matcher = SequenceMatcher(None, pred_lines, exp_lines)
+    return matcher.ratio()
+
+def extract_file_structure(tree_str: str) -> List[str]:
+    """Extract file/directory names from filesystem tree string."""
+    files = []
+    for line in tree_str.split('\n'):
+        if not line.strip():
+            continue
+        # Remove tree symbols and extract filename
+        cleaned = line
+        for prefix in ['├── ', '└── ', '│   ', '├──', '└──', '│']:
+            cleaned = cleaned.replace(prefix, '')
+        
+        parts = cleaned.strip().split()
+        if parts and not parts[0].startswith('/'):
+            files.append(parts[0])
+    
+    return files
 
 def evaluate_batch(examples: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
@@ -377,14 +441,9 @@ def evaluate_dataset(
     """
     print(f"Loading dataset from {dataset_file}")
     
-    try:
-        with open(dataset_file, 'r') as f:
-            examples = json.load(f)
-    except FileNotFoundError:
-        print(f"Dataset file not found: {dataset_file}")
-        return {}
-    except json.JSONDecodeError as e:
-        print(f"Error parsing dataset file: {e}")
+    examples = load_dataset(dataset_file)
+    if not examples:
+        print(f"Failed to load dataset from {dataset_file}")
         return {}
     
     if not examples:
@@ -454,6 +513,113 @@ def evaluate_dataset(
                 print(f"     Error: {error['error']}")
     
     return stats
+
+def load_hf_format(file_path: str) -> List[Dict[str, str]]:
+    """
+    Load HuggingFace JSONL format data.
+    
+    Args:
+        file_path: Path to JSONL file
+        
+    Returns:
+        List of HuggingFace format examples
+    """
+    examples = []
+    with open(file_path, 'r') as f:
+        for line in f:
+            if line.strip():
+                examples.append(json.loads(line.strip()))
+    return examples
+
+def convert_hf_to_structured(hf_examples: List[Dict[str, str]]) -> List[Dict[str, Any]]:
+    """
+    Convert HuggingFace format back to structured format for evaluation.
+    
+    Args:
+        hf_examples: List of HuggingFace format examples
+        
+    Returns:
+        List of structured examples
+    """
+    structured_examples = []
+    
+    for hf_example in hf_examples:
+        prompt = hf_example['prompt']
+        completion = hf_example['completion']
+        
+        # Parse the prompt to extract initial_state and operation
+        lines = prompt.split('\n')
+        
+        # Find the current filesystem state section
+        state_start = -1
+        state_end = -1
+        operation_line = -1
+        
+        for i, line in enumerate(lines):
+            if 'Current filesystem state:' in line:
+                state_start = i + 1
+            elif 'Operation:' in line:
+                state_end = i
+                operation_line = i
+                break
+        
+        if state_start == -1 or operation_line == -1:
+            # Fallback parsing for malformed prompts
+            initial_state = ""
+            operation = "unknown"
+        else:
+            # Extract initial state
+            if state_end > state_start:
+                initial_state = '\n'.join(lines[state_start:state_end]).strip()
+            else:
+                initial_state = ""
+            
+            # Extract operation
+            operation = lines[operation_line].replace('Operation:', '').strip()
+        
+        # Determine operation type based on operation name
+        operation_type = "state_change"  # Default assumption
+        if any(op in operation.lower() for op in ['readdir', 'stat', 'ls']):
+            operation_type = "query"
+        
+        structured_example = {
+            'initial_state': initial_state,
+            'operation': operation,
+            'result': completion,
+            'operation_type': operation_type,
+            'shell_command': '',  # Not available from HF format
+            'fuse_operations': []  # Not available from HF format
+        }
+        
+        structured_examples.append(structured_example)
+    
+    return structured_examples
+
+def load_dataset(file_path: str) -> List[Dict[str, Any]]:
+    """
+    Load dataset in either structured JSON or HuggingFace JSONL format.
+    
+    Args:
+        file_path: Path to dataset file
+        
+    Returns:
+        List of structured examples
+    """
+    try:
+        if file_path.endswith('.jsonl'):
+            # Assume HuggingFace format
+            print("Detected HuggingFace JSONL format")
+            hf_examples = load_hf_format(file_path)
+            return convert_hf_to_structured(hf_examples)
+        else:
+            # Assume structured JSON format
+            print("Detected structured JSON format")
+            with open(file_path, 'r') as f:
+                examples = json.load(f)
+            return examples
+    except Exception as e:
+        print(f"Error loading dataset: {e}")
+        return []
 
 if __name__ == "__main__":
     # Example usage

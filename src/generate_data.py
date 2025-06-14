@@ -295,8 +295,12 @@ def start_fuse_filesystem(mount_dir: str, log_file: str) -> subprocess.Popen:
     import sys
     python_path = sys.executable
     
-    # Start the reference FUSE filesystem
-    cmd = [python_path, '-m', 'src.reference_fuse', mount_dir, log_file]
+    # Create a temporary root directory for the loopback filesystem
+    root_dir = os.path.join(os.path.dirname(mount_dir), 'fuse_root')
+    os.makedirs(root_dir, exist_ok=True)
+    
+    # Start the reference FUSE filesystem with loopback to root_dir
+    cmd = [python_path, '-m', 'src.reference_fuse', mount_dir, root_dir, log_file]
     
     process = subprocess.Popen(
         cmd,
@@ -492,16 +496,17 @@ def generate_one(_worker_id: Optional[int] = None) -> Dict[str, Any]:
             # Always clean up the FUSE filesystem
             stop_fuse_filesystem(mount_dir, fuse_process)
 
-def generate_data(num_examples: int = DEFAULT_NUM_EXAMPLES, output_file: Optional[str] = None) -> List[Dict[str, Any]]:
+def generate_data(num_examples: int = DEFAULT_NUM_EXAMPLES, output_file: Optional[str] = None, hf_format: bool = False) -> List[Dict[str, Any]]:
     """
     Generate training data using FUSE operations.
     
     Args:
         num_examples: Number of training examples to generate
-        output_file: Path to output JSON file (if None, returns data without saving)
+        output_file: Path to output file (if None, returns data without saving)
+        hf_format: If True, save in HuggingFace JSONL format; if False, save structured JSON
         
     Returns:
-        List of generated training examples
+        List of generated training examples (always in structured format)
     """
     print(f"Generating {num_examples} examples using FUSE operations...")
     
@@ -521,11 +526,89 @@ def generate_data(num_examples: int = DEFAULT_NUM_EXAMPLES, output_file: Optiona
     
     if output_file:
         print(f"Writing {len(examples)} examples to {output_file}")
-        with open(output_file, 'w') as f:
-            json.dump(examples, f, indent=2)
+        if hf_format:
+            print("Using HuggingFace JSONL format")
+            save_hf_format(examples, output_file)
+        else:
+            print("Using structured JSON format")
+            with open(output_file, 'w') as f:
+                json.dump(examples, f, indent=2)
         print("Data generation complete!")
     
     return examples
+
+def convert_to_hf_format(examples: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+    """
+    Convert structured training examples to HuggingFace format.
+    
+    Args:
+        examples: List of structured training examples
+        
+    Returns:
+        List of HuggingFace format examples with 'prompt' and 'completion' keys
+    """
+    hf_examples = []
+    
+    for example in examples:
+        # Construct the prompt (same logic as in LLMFS)
+        current_state = example['initial_state']
+        operation = example['operation']
+        
+        # Extract operation and parameters for better formatting
+        if '(' in operation and ')' in operation:
+            op_name = operation.split('(')[0]
+            params_part = operation[operation.find('(')+1:operation.rfind(')')]
+            
+            prompt = f"""You are a filesystem. Given the current state and an operation, return EXACTLY the new filesystem state.
+
+Current filesystem state:
+{current_state}
+
+Operation: {operation}
+
+CRITICAL REQUIREMENTS:
+- Return the COMPLETE filesystem tree in EXACT same format as input
+- Use root:root for ownership (not user:user)
+- Preserve exact timestamp format: "Jun 14 17:57"
+- Include file sizes (e.g., "36 B", "0 B")
+- Use exact tree symbols: ├── └── │
+- If operation fails (file doesn't exist, etc.), return UNCHANGED state
+- NO extra text, just the filesystem tree
+
+New filesystem state:"""
+        else:
+            # Fallback for malformed operations
+            prompt = f"""You are a filesystem. Given the current state and an operation, return the new state.
+
+Current filesystem state:
+{current_state}
+
+Operation: {operation}
+
+New filesystem state:"""
+        
+        completion = example['result']
+        
+        hf_examples.append({
+            'prompt': prompt,
+            'completion': completion
+        })
+    
+    return hf_examples
+
+def save_hf_format(examples: List[Dict[str, Any]], output_file: str) -> None:
+    """
+    Save examples in HuggingFace JSONL format.
+    
+    Args:
+        examples: List of training examples  
+        output_file: Path to output JSONL file
+    """
+    hf_examples = convert_to_hf_format(examples)
+    
+    with open(output_file, 'w') as f:
+        for example in hf_examples:
+            f.write(json.dumps(example) + '\n')
 
 def main():
     """Main CLI entry point."""
@@ -550,13 +633,19 @@ Examples:
         '-o', '--output',
         type=str,
         default='training_data.json',
-        help='Output JSON file path (default: training_data.json)'
+        help='Output file path (default: training_data.json)'
+    )
+    
+    parser.add_argument(
+        '--hf-format',
+        action='store_true',
+        help='Save in HuggingFace JSONL format instead of structured JSON'
     )
     
     args = parser.parse_args()
     
     # Generate the data
-    generate_data(num_examples=args.num_examples, output_file=args.output)
+    generate_data(num_examples=args.num_examples, output_file=args.output, hf_format=args.hf_format)
 
 if __name__ == "__main__":
     check_fuse_support()
