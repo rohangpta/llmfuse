@@ -907,6 +907,12 @@ def main():
         "  modal run modal_run.py::compare_gemini_qwen3    # Compare Gemini vs Qwen3 (vLLM)"
     )
     print(
+        "  modal run modal_run.py::eval_sizes              # Evaluate all Qwen3 sizes on filesystem ops"
+    )
+    print(
+        "  modal run modal_run.py::analyze_eval_results --results-file='path/to/results.json'  # Analyze saved results"
+    )
+    print(
         "  modal run modal_run.py::download_model --model-name='qwen3-8b'  # Cache model"
     )
     print("\nAvailable vLLM servers:")
@@ -917,6 +923,527 @@ def main():
     print("  modal run modal_run.py::serve_qwen3_8b          # Qwen3 8B")
     print("  modal run modal_run.py::serve_qwen3_14b         # Qwen3 14B")
     print("  modal run modal_run.py::serve_qwen3_32b         # Qwen3 32B")
+
+
+def parse_fuse_operation(operation_str: str) -> tuple[str, str, Dict[str, Any]]:
+    """Parse a FUSE operation string into components."""
+    if operation_str.startswith("FUSE "):
+        operation_str = operation_str[5:]  # Remove 'FUSE ' prefix
+
+    if "(" in operation_str and ")" in operation_str:
+        op_name = operation_str.split("(")[0]
+        params_part = operation_str[
+            operation_str.find("(") + 1 : operation_str.rfind(")")
+        ]
+
+        path = ""
+        params = {}
+
+        if params_part:
+            parts = [p.strip() for p in params_part.split(",")]
+            if parts:
+                path_part = parts[0].strip("'\"")
+                path = path_part
+
+                for part in parts[1:]:
+                    if "=" in part:
+                        key, value = part.split("=", 1)
+                        key = key.strip()
+                        value = value.strip().strip("'\"")
+                        params[key] = value
+
+        return op_name, path, params
+    else:
+        return "shell", operation_str, {}
+
+
+def calculate_similarity(
+    predicted: str, expected: str, operation_type: str = "unknown"
+) -> float:
+    """Calculate similarity between predicted and expected results."""
+    if not predicted and not expected:
+        return 1.0
+
+    if not predicted or not expected:
+        return 0.0
+
+    if predicted.strip() == expected.strip():
+        return 1.0
+
+    pred_normalized = " ".join(predicted.split())
+    exp_normalized = " ".join(expected.split())
+
+    if pred_normalized == exp_normalized:
+        return 1.0
+
+    # Character-level similarity for filesystem operations
+    pred_chars = set(pred_normalized.lower())
+    exp_chars = set(exp_normalized.lower())
+
+    if not pred_chars and not exp_chars:
+        return 1.0
+
+    intersection = len(pred_chars.intersection(exp_chars))
+    union = len(pred_chars.union(exp_chars))
+
+    return intersection / union if union > 0 else 0.0
+
+
+def load_evaluation_dataset() -> List[Dict[str, Any]]:
+    """Load evaluation dataset for filesystem operations."""
+    # Sample evaluation dataset for filesystem operations
+    return [
+        {
+            "initial_state": "/\n├── home/\n│   └── user/\n└── tmp/",
+            "operation": "mkdir('/home/user/documents', mode='0o755')",
+            "result": "/\n├── home/\n│   └── user/\n│       └── documents/\n└── tmp/",
+            "operation_type": "state_change",
+        },
+        {
+            "initial_state": "/\n├── home/\n│   └── user/\n│       ├── file1.txt\n│       └── file2.txt\n└── tmp/",
+            "operation": "readdir('/home/user')",
+            "result": "file1.txt\nfile2.txt",
+            "operation_type": "query",
+        },
+        {
+            "initial_state": "/\n├── home/\n│   └── user/\n│       └── test.txt\n└── tmp/",
+            "operation": "unlink('/home/user/test.txt')",
+            "result": "/\n├── home/\n│   └── user/\n└── tmp/",
+            "operation_type": "state_change",
+        },
+        {
+            "initial_state": "/\n├── home/\n│   └── user/\n│       └── docs/\n│           └── readme.txt\n└── tmp/",
+            "operation": "chmod('/home/user/docs/readme.txt', mode='0o644')",
+            "result": "/\n├── home/\n│   └── user/\n│       └── docs/\n│           └── readme.txt (644)",
+            "operation_type": "state_change",
+        },
+        {
+            "initial_state": "/\n├── home/\n│   └── user/\n│       ├── project/\n│       └── backup/\n└── tmp/",
+            "operation": "readdir('/home/user')",
+            "result": "project\nbackup",
+            "operation_type": "query",
+        },
+        {
+            "initial_state": "/\n├── home/\n│   └── user/\n└── tmp/\n    └── cache/",
+            "operation": "rmdir('/tmp/cache')",
+            "result": "/\n├── home/\n│   └── user/\n└── tmp/",
+            "operation_type": "state_change",
+        },
+        {
+            "initial_state": "/\n├── home/\n│   └── user/\n│       └── old_name.txt\n└── tmp/",
+            "operation": "rename('/home/user/old_name.txt', '/home/user/new_name.txt')",
+            "result": "/\n├── home/\n│   └── user/\n│       └── new_name.txt\n└── tmp/",
+            "operation_type": "state_change",
+        },
+        {
+            "initial_state": "/\n├── home/\n│   └── user/\n│       └── file.txt\n└── tmp/",
+            "operation": "getattr('/home/user/file.txt')",
+            "result": "type: file, size: 1024, mode: 644",
+            "operation_type": "query",
+        },
+    ]
+
+
+async def evaluate_model_on_dataset(
+    llm, model_name: str, dataset: List[Dict[str, Any]]
+) -> Dict[str, Any]:
+    """Evaluate a single model on the dataset."""
+    from vllm import SamplingParams
+
+    results = []
+
+    sampling_params = SamplingParams(
+        temperature=0.0,
+        max_tokens=512,
+        top_p=1.0,
+    )
+
+    for example in dataset:
+        try:
+            # Create evaluation prompt
+            prompt = f"""You are simulating a filesystem. Given the current state and operation, predict the exact result.
+
+Current filesystem state:
+{example["initial_state"]}
+
+Operation: {example["operation"]}
+
+Provide only the result as it would appear after the operation:"""
+
+            # Format for Qwen3 chat format
+            messages = [{"role": "user", "content": prompt}]
+            formatted_prompt = llm.get_tokenizer().apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+                enable_thinking=False,
+            )
+
+            outputs = llm.generate([formatted_prompt], sampling_params)
+            predicted = outputs[0].outputs[0].text.strip()
+
+            # Clean up any remaining thinking tags
+            if predicted.startswith("<think>"):
+                think_end = predicted.find("</think>")
+                if think_end != -1:
+                    predicted = predicted[think_end + 8 :].strip()
+                else:
+                    predicted = predicted[7:].strip()
+
+            expected = example["result"]
+            similarity = calculate_similarity(
+                predicted, expected, example["operation_type"]
+            )
+            correct = similarity > 0.7  # 70% similarity threshold
+
+            results.append(
+                {
+                    "operation": example["operation"],
+                    "operation_type": example["operation_type"],
+                    "predicted": predicted,
+                    "expected": expected,
+                    "similarity": similarity,
+                    "correct": correct,
+                }
+            )
+
+        except Exception as e:
+            results.append(
+                {
+                    "operation": example["operation"],
+                    "operation_type": example["operation_type"],
+                    "predicted": f"Error: {str(e)}",
+                    "expected": example["result"],
+                    "similarity": 0.0,
+                    "correct": False,
+                }
+            )
+
+    # Calculate statistics
+    total = len(results)
+    correct = sum(1 for r in results if r["correct"])
+    accuracy = correct / total if total > 0 else 0.0
+
+    # Statistics by operation type
+    by_type = {}
+    for result in results:
+        op_type = result["operation_type"]
+        if op_type not in by_type:
+            by_type[op_type] = []
+        by_type[op_type].append(result)
+
+    type_stats = {}
+    for op_type, type_results in by_type.items():
+        type_correct = sum(1 for r in type_results if r["correct"])
+        type_stats[op_type] = {
+            "total": len(type_results),
+            "correct": type_correct,
+            "accuracy": type_correct / len(type_results) if type_results else 0.0,
+        }
+
+    return {
+        "model_name": model_name,
+        "total_examples": total,
+        "correct_predictions": correct,
+        "overall_accuracy": accuracy,
+        "accuracy_by_type": type_stats,
+        "detailed_results": results,
+    }
+
+
+@app.function(
+    image=vllm_image,
+    gpu="A100-40GB",
+    volumes={
+        MODEL_CACHE_PATH: model_cache,
+        VLLM_CACHE_PATH: vllm_cache,
+    },
+    timeout=30 * MINUTES,  # 30 minutes per model
+    secrets=[
+        modal.Secret.from_name("gemini-api-key"),
+        modal.Secret.from_name("huggingface-secret"),
+    ],
+)
+async def eval_single_size(model_name: str) -> Dict[str, Any]:
+    """Evaluate a single Qwen model size on filesystem operations."""
+
+    print(f"🚀 Evaluating {model_name.upper()} on filesystem operations")
+    print("-" * 60)
+
+    # Load evaluation dataset
+    dataset = load_evaluation_dataset()
+
+    # Convert simplified model names to full HF model names
+    if model_name.lower() in QWEN3_MODELS:
+        full_model_name = QWEN3_MODELS[model_name.lower()]
+    else:
+        full_model_name = model_name
+
+    try:
+        from vllm import LLM
+
+        print(f"📦 Loading {full_model_name}...")
+        llm = LLM(
+            model=full_model_name,
+            trust_remote_code=True,
+            enforce_eager=True,
+            gpu_memory_utilization=0.8,
+        )
+
+        # Evaluate model on dataset
+        result = await evaluate_model_on_dataset(llm, model_name, dataset)
+
+        print(f"✅ {model_name}: {result['overall_accuracy']:.2%} accuracy")
+        print(f"   Correct: {result['correct_predictions']}/{result['total_examples']}")
+
+        # Clean up model to free memory
+        del llm
+        import gc
+
+        gc.collect()
+
+        return result
+
+    except Exception as e:
+        print(f"❌ Failed to evaluate {model_name}: {e}")
+        return {"model_name": model_name, "error": str(e), "overall_accuracy": 0.0}
+
+
+@app.function(
+    image=vllm_image,
+    timeout=60 * MINUTES,  # 1 hour total timeout
+    secrets=[
+        modal.Secret.from_name("gemini-api-key"),
+        modal.Secret.from_name("huggingface-secret"),
+    ],
+)
+async def eval_sizes():
+    """Evaluate all Qwen model sizes on filesystem operations in parallel."""
+
+    print("🔥 EVALUATING ALL QWEN3 MODEL SIZES ON FILESYSTEM OPERATIONS (PARALLEL)")
+    print("=" * 80)
+
+    # Load evaluation dataset for info
+    dataset = load_evaluation_dataset()
+    print(f"📊 Loaded {len(dataset)} evaluation examples")
+
+    # Models to evaluate (starting with smaller ones)
+    # Note: Add "qwen3-32b" if you have enough GPU quota and time
+    models_to_eval = ["qwen3-1.7b", "qwen3-4b", "qwen3-8b", "qwen3-14b"]
+
+    print(f"🚀 Launching {len(models_to_eval)} parallel evaluations...")
+    print("   Each model will run on its own GPU instance")
+
+    # Run evaluations in parallel using Modal's async map functionality
+    results_list = []
+    async for result in eval_single_size.map.aio(models_to_eval):
+        results_list.append(result)
+        print(f"📥 Received results for {result['model_name']}")
+
+    # Convert list of results back to dictionary
+    all_results = {result["model_name"]: result for result in results_list}
+
+    print(f"\n✅ All {len(results_list)} parallel evaluations completed!")
+
+    # Print comparison summary
+    print("\n" + "=" * 80)
+    print("📊 EVALUATION SUMMARY - QWEN3 MODEL COMPARISON")
+    print("=" * 80)
+
+    print("\nOverall Accuracy by Model Size:")
+    sorted_models = sorted(
+        all_results.items(), key=lambda x: x[1].get("overall_accuracy", 0), reverse=True
+    )
+
+    for model_name, result in sorted_models:
+        if "error" not in result:
+            accuracy = result["overall_accuracy"]
+            correct = result["correct_predictions"]
+            total = result["total_examples"]
+            print(f"  {model_name:<15}: {accuracy:.2%} ({correct}/{total})")
+
+            # Show breakdown by operation type
+            for op_type, stats in result["accuracy_by_type"].items():
+                print(
+                    f"    {op_type:<12}: {stats['accuracy']:.2%} ({stats['correct']}/{stats['total']})"
+                )
+        else:
+            print(f"  {model_name:<15}: ERROR - {result['error']}")
+
+    # Show detailed analysis
+    print("\n" + "=" * 80)
+    print("📈 DETAILED ANALYSIS")
+    print("=" * 80)
+
+    # Find best and worst performing models
+    successful_results = [(k, v) for k, v in all_results.items() if "error" not in v]
+
+    if successful_results:
+        best_model, best_result = max(
+            successful_results, key=lambda x: x[1]["overall_accuracy"]
+        )
+        worst_model, worst_result = min(
+            successful_results, key=lambda x: x[1]["overall_accuracy"]
+        )
+
+        print(f"\n🏆 Best performing model: {best_model}")
+        print(f"   Accuracy: {best_result['overall_accuracy']:.2%}")
+
+        print(f"\n📉 Needs improvement: {worst_model}")
+        print(f"   Accuracy: {worst_result['overall_accuracy']:.2%}")
+
+        # Show examples where models differ
+        print(f"\n🔍 Example differences between {best_model} and {worst_model}:")
+
+        best_details = best_result["detailed_results"]
+        worst_details = worst_result["detailed_results"]
+
+        differences_shown = 0
+        for i, (best_ex, worst_ex) in enumerate(zip(best_details, worst_details)):
+            if best_ex["correct"] != worst_ex["correct"] and differences_shown < 2:
+                print(f"\n  Example {i + 1}: {best_ex['operation']}")
+                print(f"    Expected: {best_ex['expected'][:100]}...")
+                print(
+                    f"    {best_model}: {'✅' if best_ex['correct'] else '❌'} {best_ex['predicted'][:100]}..."
+                )
+                print(
+                    f"    {worst_model}: {'✅' if worst_ex['correct'] else '❌'} {worst_ex['predicted'][:100]}..."
+                )
+                differences_shown += 1
+
+    print(
+        f"\n🎉 Evaluation completed! Tested {len(models_to_eval)} models on {len(dataset)} filesystem operations."
+    )
+
+    # Save detailed results to file for later inspection
+    import time
+
+    output_data = {
+        "evaluation_summary": {
+            "total_models": len(models_to_eval),
+            "total_examples_per_model": len(dataset),
+            "models_evaluated": [
+                m for m in models_to_eval if "error" not in all_results.get(m, {})
+            ],
+            "models_failed": [
+                m for m in models_to_eval if "error" in all_results.get(m, {})
+            ],
+            "best_model": best_model if successful_results else None,
+            "best_accuracy": best_result["overall_accuracy"]
+            if successful_results
+            else None,
+        },
+        "detailed_results": all_results,
+        "evaluation_dataset": dataset,
+        "evaluation_timestamp": time.time(),
+        "evaluation_config": {
+            "similarity_threshold": 0.7,
+            "temperature": 0.0,
+            "max_tokens": 512,
+            "gpu_memory_utilization": 0.8,
+        },
+    }
+
+    # Save to JSON file
+    timestamp = int(time.time())
+    output_filename = f"qwen3_eval_results_{timestamp}.json"
+
+    with open(f"/tmp/{output_filename}", "w") as f:
+        json.dump(output_data, f, indent=2)
+
+    print(f"\n💾 Detailed results saved to: /tmp/{output_filename}")
+    print(
+        "   This file contains all predictions, expected outputs, and failure details"
+    )
+    print("   You can download it from Modal for detailed analysis")
+
+    return all_results
+
+
+@app.function(
+    image=vllm_image,
+    timeout=10 * MINUTES,
+)
+def analyze_eval_results(results_file: str):
+    """Analyze saved evaluation results and show detailed failure analysis."""
+
+    print("🔍 ANALYZING EVALUATION RESULTS")
+    print("=" * 50)
+
+    try:
+        with open(results_file, "r") as f:
+            data = json.load(f)
+
+        summary = data["evaluation_summary"]
+        detailed_results = data["detailed_results"]
+
+        print(f"📊 Evaluation Summary:")
+        print(f"   Models evaluated: {len(summary['models_evaluated'])}")
+        print(f"   Models failed: {len(summary['models_failed'])}")
+        print(f"   Examples per model: {summary['total_examples_per_model']}")
+        print(
+            f"   Best model: {summary['best_model']} ({summary['best_accuracy']:.2%})"
+        )
+
+        # Detailed failure analysis
+        print(f"\n❌ FAILURE ANALYSIS")
+        print("=" * 50)
+
+        for model_name, results in detailed_results.items():
+            if "error" in results:
+                print(f"\n🚫 {model_name}: FAILED TO LOAD")
+                print(f"   Error: {results['error']}")
+                continue
+
+            failures = [r for r in results["detailed_results"] if not r["correct"]]
+            if failures:
+                print(
+                    f"\n🔍 {model_name} failures ({len(failures)}/{results['total_examples']}):"
+                )
+
+                for i, failure in enumerate(failures):
+                    print(f"\n  Failure {i + 1}: {failure['operation']}")
+                    print(f"    Expected: {failure['expected']}")
+                    print(f"    Predicted: {failure['predicted']}")
+                    print(f"    Similarity: {failure.get('similarity', 'N/A'):.2f}")
+                    print(f"    Type: {failure['operation_type']}")
+            else:
+                print(f"\n✅ {model_name}: Perfect score! No failures.")
+
+        # Operation-specific analysis
+        print(f"\n📈 OPERATION-SPECIFIC ANALYSIS")
+        print("=" * 50)
+
+        # Collect results by operation
+        by_operation = {}
+        for model_name, results in detailed_results.items():
+            if "error" in results:
+                continue
+            for result in results["detailed_results"]:
+                op = result["operation"]
+                if op not in by_operation:
+                    by_operation[op] = []
+                by_operation[op].append((model_name, result))
+
+        for operation, op_results in by_operation.items():
+            print(f"\n🔧 {operation}")
+            correct_count = sum(1 for _, r in op_results if r["correct"])
+            total_count = len(op_results)
+            print(
+                f"   Overall success rate: {correct_count}/{total_count} ({correct_count / total_count:.2%})"
+            )
+
+            # Show which models failed this operation
+            failures = [(model, r) for model, r in op_results if not r["correct"]]
+            if failures:
+                print(f"   Models that failed:")
+                for model, failure in failures:
+                    print(f"     {model}: {failure['predicted'][:100]}...")
+
+        return f"Analysis complete. Found {sum(len([r for r in results['detailed_results'] if not r['correct']]) for results in detailed_results.values() if 'error' not in results)} total failures across all models."
+
+    except Exception as e:
+        return f"Error analyzing results: {e}"
 
 
 if __name__ == "__main__":
