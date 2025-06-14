@@ -1460,5 +1460,149 @@ def analyze_eval_results(results_filename: str):
         return f"Error analyzing results: {e}"
 
 
+@app.function(
+    image=vllm_image,
+    gpu="H100",
+    volumes={
+        MODEL_CACHE_PATH: model_cache,
+        VLLM_CACHE_PATH: vllm_cache,
+        EVAL_RESULTS_PATH: eval_results_volume,
+        "/root/trained_models": modal.Volume.from_name(
+            "qwen3-trained-models", create_if_missing=True
+        ),
+    },
+    timeout=30 * MINUTES,
+    secrets=[
+        modal.Secret.from_name("gemini-api-key"),
+        modal.Secret.from_name("huggingface-secret"),
+    ],
+)
+async def eval_trained_model(
+    model_path: str, base_model_name: str = "qwen3-4b"
+) -> Dict[str, Any]:
+    """
+    Evaluate a trained model using the filesystem evaluation dataset.
+
+    Args:
+        model_path: Path to the trained model (e.g., "qwen3-4b-sft-3epochs")
+        base_model_name: Base model name for comparison (e.g., "qwen3-4b")
+    """
+    import subprocess
+    import time
+    from datetime import datetime
+
+    print(f"🧪 Evaluating trained model: {model_path}")
+    print(f"📊 Base model for comparison: {base_model_name}")
+
+    # Full path to trained model
+    full_model_path = f"/root/trained_models/{model_path}"
+
+    if not os.path.exists(full_model_path):
+        raise ValueError(f"Trained model not found at: {full_model_path}")
+
+    # Start vLLM server for the trained model
+    print("🚀 Starting vLLM server for trained model...")
+
+    # Use the trained model path directly
+    vllm_cmd = [
+        "python",
+        "-m",
+        "vllm.entrypoints.openai.api_server",
+        "--model",
+        full_model_path,
+        "--host",
+        "0.0.0.0",
+        "--port",
+        str(VLLM_PORT),
+        "--tensor-parallel-size",
+        "1",
+        "--gpu-memory-utilization",
+        "0.9",
+        "--max-model-len",
+        "8192",
+        "--trust-remote-code",
+        "--disable-log-requests",
+    ]
+
+    # Start the server
+    server_process = subprocess.Popen(
+        vllm_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+    )
+
+    # Wait for server to start
+    server_url = f"http://localhost:{VLLM_PORT}"
+    max_wait_time = 300  # 5 minutes
+    wait_time = 0
+    server_ready = False
+
+    while wait_time < max_wait_time:
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    f"{server_url}/health", timeout=aiohttp.ClientTimeout(total=5)
+                ) as resp:
+                    if resp.status == 200:
+                        server_ready = True
+                        break
+        except:
+            pass
+
+        time.sleep(5)
+        wait_time += 5
+        print(f"⏳ Waiting for vLLM server... ({wait_time}s)")
+
+    if not server_ready:
+        server_process.terminate()
+        raise RuntimeError("vLLM server failed to start within timeout period")
+
+    print("✅ vLLM server is ready!")
+
+    try:
+        # Load evaluation dataset
+        dataset = load_evaluation_dataset()
+        print(f"📊 Loaded {len(dataset)} evaluation examples")
+
+        # Create a mock LLM object for the evaluation function
+        class TrainedModelLLM:
+            def __init__(self, server_url, model_path):
+                self.server_url = server_url
+                self.model_path = model_path
+
+            async def generate_response(self, prompt: str) -> str:
+                return await _get_vllm_response(
+                    self.server_url, prompt, self.model_path, temperature=0.0
+                )
+
+        llm = TrainedModelLLM(server_url, model_path)
+
+        # Evaluate the trained model
+        results = await evaluate_model_on_dataset(llm, f"trained-{model_path}", dataset)
+
+        # Save results
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        results_filename = (
+            f"trained_model_eval_{model_path.replace('/', '_')}_{timestamp}.json"
+        )
+        results_path = f"{EVAL_RESULTS_PATH}/{results_filename}"
+
+        with open(results_path, "w") as f:
+            json.dump(results, f, indent=2)
+
+        # Commit results to volume
+        eval_results_volume.commit()
+
+        print(f"💾 Results saved to: {results_filename}")
+        print(f"🎯 Overall accuracy: {results['overall_accuracy']:.1%}")
+        print(f"📊 Average similarity: {results['average_similarity']:.3f}")
+
+        return results
+
+    finally:
+        # Clean up server
+        print("🧹 Shutting down vLLM server...")
+        server_process.terminate()
+        server_process.wait()
+
+
 if __name__ == "__main__":
     main()
