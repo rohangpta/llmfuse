@@ -1,3 +1,5 @@
 fusepy==3.0.1
 google-generativeai
 pytest==8.4.0
+transformers>=4.51.0
+torch>=2.0.0
