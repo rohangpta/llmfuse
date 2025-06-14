@@ -1,0 +1,39 @@
+FROM python:3.12-slim
+
+# Install system dependencies for filesystem operations and FUSE
+RUN apt-get update && \
+    apt-get install -y \
+    coreutils \
+    findutils \
+    util-linux \
+    procps \
+    fuse3 \
+    libfuse3-dev \
+    libfuse2 \
+    pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create app directory
+WORKDIR /app
+
+# Copy requirements and install Python dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy the source code
+COPY src/ ./src/
+
+# Create a non-root user for safer operations
+RUN useradd -m -u 1000 appuser && \
+    chown -R appuser:appuser /app
+
+# Create fuse group and add appuser to it for FUSE access
+RUN groupadd -f fuse && usermod -a -G fuse appuser
+
+# Set environment variables
+ENV PYTHONPATH=/app
+ENV PYTHONUNBUFFERED=1
+
+# For FUSE operations, we need to run as root initially, then drop privileges
+# Default command for data generation
+CMD ["python", "-c", "from src.generate_data import generate_data; generate_data()"] 

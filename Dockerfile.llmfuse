@@ -1,0 +1,26 @@
+FROM python:3.9-slim
+
+# Install FUSE and other dependencies
+RUN apt-get update && \
+    apt-get install -y fuse && \
+    rm -rf /var/lib/apt/lists/*
+
+# Create app directory
+WORKDIR /app
+
+# Copy requirements and install Python dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy the source code
+COPY src/ ./src/
+COPY mount_llmfuse.py ./
+
+# Create mount point
+RUN mkdir /mnt/fuse
+
+# Add FUSE device support
+RUN echo "user_allow_other" >> /etc/fuse.conf
+
+# Run with FUSE device access
+ENTRYPOINT ["python", "mount_llmfuse.py", "/mnt/fuse"]

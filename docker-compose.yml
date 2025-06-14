@@ -1,0 +1,89 @@
+version: '3.8'
+
+services:
+  # FUSE filesystem service
+  fuse:
+    build:
+      context: .
+      dockerfile: Dockerfile.llmfuse
+    privileged: true  # Required for FUSE
+    volumes:
+      - ./src:/app/src  # Mount source code for development
+    devices:
+      - /dev/fuse:/dev/fuse  # Give access to FUSE device
+    cap_add:
+      - SYS_ADMIN  # Required for FUSE
+    security_opt:
+      - apparmor:unconfined  # Required for FUSE
+
+  # Data generation service (Linux environment for consistent stat output)
+  datagen:
+    build:
+      context: .
+      dockerfile: Dockerfile.datagen
+    volumes:
+      - ./data:/app/data
+      - ./src:/app/src:ro  # Mount source as read-only
+    environment:
+      - PYTHONPATH=/app
+      - PYTHONUNBUFFERED=1
+    command: ["python", "-c", "import os; os.makedirs('/app/data', exist_ok=True); from src.generate_data import generate_data; generate_data(num_examples=100, output_file='/app/data/training_data_linux.json')"]
+    
+  # FUSE-enabled data generation service
+  datagen-fuse:
+    build:
+      context: .
+      dockerfile: Dockerfile.datagen
+    privileged: true  # Required for FUSE
+    volumes:
+      - ./data:/app/data
+      - ./src:/app/src:ro
+    devices:
+      - /dev/fuse:/dev/fuse
+    cap_add:
+      - SYS_ADMIN
+    security_opt:
+      - apparmor:unconfined
+    environment:
+      - PYTHONPATH=/app
+      - PYTHONUNBUFFERED=1
+    command: ["python", "-c", "import os; os.makedirs('/app/data', exist_ok=True); from src.generate_data import generate_data; generate_data(num_examples=50, output_file='/app/data/training_data_fuse.json')"]
+    
+  # Evaluation service
+  eval:
+    build:
+      context: .
+      dockerfile: Dockerfile.datagen
+    volumes:
+      - ./data:/app/data
+      - ./src:/app/src:ro
+    environment:
+      - PYTHONPATH=/app
+      - PYTHONUNBUFFERED=1
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+    command: ["python", "-c", "from src.eval import evaluate_dataset; evaluate_dataset('/app/data/training_data_linux.json', '/app/data/eval_results_linux.json', max_examples=20)"]
+    depends_on:
+      - datagen
+
+  # FUSE-enabled evaluation service
+  eval-fuse:
+    build:
+      context: .
+      dockerfile: Dockerfile.datagen
+    privileged: true  # Required for FUSE
+    volumes:
+      - ./data:/app/data
+      - ./src:/app/src:ro
+    devices:
+      - /dev/fuse:/dev/fuse
+    cap_add:
+      - SYS_ADMIN
+    security_opt:
+      - apparmor:unconfined
+    environment:
+      - PYTHONPATH=/app
+      - PYTHONUNBUFFERED=1
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+    command: ["python", "-c", "from src.eval import evaluate_dataset; evaluate_dataset('/app/data/training_data_fuse.json', '/app/data/eval_results_fuse.json', max_examples=20)"]
+    depends_on:
+      - datagen-fuse
