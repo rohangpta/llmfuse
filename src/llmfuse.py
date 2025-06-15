@@ -171,7 +171,8 @@ CRITICAL REQUIREMENTS:
 - Include file sizes (e.g., "36 B", "0 B")
 - Use exact tree symbols: ├── └── │
 - If operation fails (file doesn't exist, etc.), return UNCHANGED state
-- NO extra text, just the filesystem tree
+- NO extra text, NO reasoning, NO <think> tags - ONLY the filesystem tree
+- Start your response immediately with "/" (the root directory)
 
 New filesystem state:"""
 

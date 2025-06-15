@@ -36,4 +36,4 @@ ENV PYTHONUNBUFFERED=1
 
 # For FUSE operations, we need to run as root initially, then drop privileges
 # Default command for data generation
-CMD ["python", "-c", "from src.generate_data import generate_data; generate_data()"] 
+CMD ["python", "-c", "from train.generate_data import generate_data; generate_data()"] 

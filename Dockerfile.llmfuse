@@ -14,7 +14,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy the source code
 COPY src/ ./src/
-COPY mount_llmfuse.py ./
 
 # Create mount point
 RUN mkdir /mnt/fuse
@@ -23,4 +22,4 @@ RUN mkdir /mnt/fuse
 RUN echo "user_allow_other" >> /etc/fuse.conf
 
 # Run with FUSE device access
-ENTRYPOINT ["python", "mount_llmfuse.py", "/mnt/fuse"]
+ENTRYPOINT ["python", "src/mount_llmfuse.py", "/mnt/fuse"]

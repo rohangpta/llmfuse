@@ -19,17 +19,12 @@ if str(src_dir) not in sys.path:
 
 # Import and expose main classes
 from .llmfuse import LLMFS, main as mount_fuse
-from .eval import evaluate_dataset_unified, main as eval_main
-from .generate_data import generate_data
 from .fs_state import FSState, FileEntry
 from .model import get_model_response
 
 __all__ = [
     'LLMFS',
     'mount_fuse', 
-    'evaluate_dataset_unified',
-    'eval_main',
-    'generate_data',
     'FSState',
     'FileEntry',
     'get_model_response'

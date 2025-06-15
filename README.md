@@ -42,17 +42,17 @@ Generate synthetic training data using the reference FUSE filesystem:
 ```bash
 # Generate training data with CLI (Docker required for FUSE support)
 docker run --rm --privileged -v $(pwd):/app/host llmfuse-datagen \
-  python -m src.generate_data -n 100 -o /app/host/training_data.json
+  python -m train.generate_data -n 100 -o /app/host/training_data.json
 
 # Or use docker-compose (generates 50 examples by default)
 docker-compose up datagen-fuse
 
 # Generate smaller test datasets
 docker run --rm --privileged -v $(pwd):/app/host llmfuse-datagen \
-  python -m src.generate_data -n 10 -o /app/host/test_data.json
+  python -m train.generate_data -n 10 -o /app/host/test_data.json
 
 # On macOS (clean exit with Docker instructions)
-python -m src.generate_data --help
+python -m train.generate_data --help
 # ERROR: This script requires FUSE support and cannot run natively on macOS.
 # Please use Docker instead: ...
 ```
@@ -71,6 +71,7 @@ The data generation creates `(State_t, Operation, State_t+1)` training triples w
 
 Evaluate LLM performance on FUSE operation data:
 
+### Local Evaluation
 ```bash
 # Set up API key (add to ~/.bash_profile for persistence)
 export GEMINI_API_KEY="your-api-key-here"
@@ -78,13 +79,35 @@ export GEMINI_API_KEY="your-api-key-here"
 # Generate test data and run evaluation
 source ~/.bash_profile
 docker run --rm --privileged -v $(pwd):/app/host -e GEMINI_API_KEY=$GEMINI_API_KEY llmfuse-datagen \
-  python -m src.generate_data -n 10 -o /app/host/test_data.json
+  python -m train.generate_data -n 10 -o /app/host/test_data.json
 
 docker run --rm --privileged -v $(pwd):/app/host -e GEMINI_API_KEY=$GEMINI_API_KEY llmfuse-datagen \
-  python -c "from src.eval import evaluate_dataset; evaluate_dataset('/app/host/test_data.json', '/app/host/eval_results.json', max_examples=10)"
+  python -c "from eval.eval import evaluate_dataset; evaluate_dataset('/app/host/test_data.json', '/app/host/eval_results.json', max_examples=10)"
 
 # Or use docker-compose for evaluation
 docker-compose run --rm -e GEMINI_API_KEY=$GEMINI_API_KEY eval-fuse
+```
+
+### Modal Cloud Evaluation
+```bash
+# Evaluate single model on cloud infrastructure
+modal run eval/modal_eval.py::eval_single_size --model-name="qwen3-4b"
+
+# Evaluate all practical model sizes
+modal run eval/modal_eval.py::eval_sizes
+
+# Test individual models
+modal run eval/modal_eval.py::test_qwen3_single_vllm --model-name="qwen3-8b"
+
+# Compare Gemini vs Qwen3 models
+modal run eval/modal_eval.py::compare_gemini_qwen3_vllm
+
+# Serve individual models
+modal run eval/modal_eval.py::serve_qwen3_4b
+modal run eval/modal_eval.py::serve_qwen3_8b
+
+# Analyze saved evaluation results
+modal run eval/modal_eval.py::analyze_eval_results --results-filename="eval_results_all_sizes.json"
 ```
 
 **Expected Results (N=10 FUSE operations):**
@@ -155,16 +178,57 @@ docker-compose exec fuse /bin/bash
 
 **Supervised Fine-Tuning (SFT)**: Train on synthetically generated `(State_t, Operation) -> State_t+1` examples to teach basic mechanics and output format.
 
+```bash
+# Prepare training data on Modal
+modal run train/modal_sft.py::prepare_training_data
+
+# Train Qwen models with distributed SFT
+modal run train/modal_sft.py::train_qwen --model-name="qwen3-8b"
+modal run train/modal_sft.py::train_qwen --model-name="qwen3-8b" --use-wandb
+
+# Test trained models
+modal run train/modal_sft.py::test_trained_model --model-path="qwen3-8b-sft-3epochs-distributed"
+
+# Comprehensive evaluation of trained models
+modal run train/modal_sft.py::eval_trained_model_comprehensive --model-path="qwen3-8b-sft-3epochs-distributed"
+```
+
 **Reinforcement Learning (RL)** *(planned)*: Apply RL to enhance robustness and precision using diff-based reward signals that heavily penalize any deviation from ground truth.
 
 **Validation**: The `/dev/llm` device enables testing genuine understanding through natural language queries like "How many files are in /tmp?" that require reasoning over the current state representation.
+
+## Project Structure
+
+```
+llmfuse/
+├── eval/                          # 🔍 Evaluation & model serving
+│   ├── modal_eval.py             # Main evaluation entrypoint  
+│   ├── common.py                 # Shared utilities & Modal setup
+│   ├── qwen_models.py            # Model serving functions (by size)
+│   ├── evaluation.py             # Evaluation & testing functions  
+│   └── eval.py                   # Local evaluation utilities
+├── train/                         # 🏋️ Training & data generation
+│   ├── modal_sft.py              # Supervised fine-tuning on Modal
+│   ├── train.py                  # Distributed training script
+│   ├── generate_data.py          # Training data generation
+│   └── generate_data_test.py     # Data generation tests
+├── src/                          # 💾 Core filesystem code
+│   ├── mount_llmfuse.py          # Filesystem mount script
+│   ├── llmfuse.py               # Core FUSE operations
+│   ├── model.py                 # Model interface
+│   └── fs_state.py              # Filesystem state management
+├── data/                         # 📊 Training datasets
+│   ├── training_data_100.jsonl  # Small training set
+│   └── training_data_1000.jsonl # Large training set
+└── README.md
+```
 
 ## Architecture
 
 The experiment consists of two key components:
 
-1. **Reference FUSE Implementation** (`reference_fuse.py`): Provides perfect ground truth by executing real filesystem operations and logging all FUSE calls. This generates the training data.
+1. **Reference FUSE Implementation** (`src/reference_fuse.py`): Provides perfect ground truth by executing real filesystem operations and logging all FUSE calls. This generates the training data.
 
-2. **LLM FUSE Implementation** (`llmfuse.py`): Routes ALL filesystem operations through an LLM, which must predict the complete new filesystem state for each operation. This is what gets trained and evaluated.
+2. **LLM FUSE Implementation** (`src/llmfuse.py`): Routes ALL filesystem operations through an LLM, which must predict the complete new filesystem state for each operation. This is what gets trained and evaluated.
 
 The LLM filesystem deliberately has no built-in knowledge of filesystem semantics - it must learn everything from the training data generated by the reference implementation.

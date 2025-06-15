@@ -9,6 +9,7 @@ services:
     privileged: true  # Required for FUSE
     volumes:
       - ./src:/app/src  # Mount source code for development
+      - ./train:/app/train  # Mount training code
     devices:
       - /dev/fuse:/dev/fuse  # Give access to FUSE device
     cap_add:
@@ -24,10 +25,11 @@ services:
     volumes:
       - ./data:/app/data
       - ./src:/app/src:ro  # Mount source as read-only
+      - ./train:/app/train:ro  # Mount training code as read-only
     environment:
       - PYTHONPATH=/app
       - PYTHONUNBUFFERED=1
-    command: ["python", "-c", "import os; os.makedirs('/app/data', exist_ok=True); from src.generate_data import generate_data; generate_data(num_examples=100, output_file='/app/data/training_data_linux.json')"]
+    command: ["python", "-c", "import os; os.makedirs('/app/data', exist_ok=True); from train.generate_data import generate_data; generate_data(num_examples=100, output_file='/app/data/training_data_linux.json')"]
     
   # FUSE-enabled data generation service
   datagen-fuse:
@@ -38,6 +40,7 @@ services:
     volumes:
       - ./data:/app/data
       - ./src:/app/src:ro
+      - ./train:/app/train:ro  # Mount training code as read-only
     devices:
       - /dev/fuse:/dev/fuse
     cap_add:
@@ -47,7 +50,7 @@ services:
     environment:
       - PYTHONPATH=/app
       - PYTHONUNBUFFERED=1
-    command: ["python", "-c", "import os; os.makedirs('/app/data', exist_ok=True); from src.generate_data import generate_data; generate_data(num_examples=50, output_file='/app/data/training_data_fuse.json')"]
+    command: ["python", "-c", "import os; os.makedirs('/app/data', exist_ok=True); from train.generate_data import generate_data; generate_data(num_examples=50, output_file='/app/data/training_data_fuse.json')"]
     
   # Evaluation service
   eval:
@@ -57,11 +60,13 @@ services:
     volumes:
       - ./data:/app/data
       - ./src:/app/src:ro
+      - ./train:/app/train:ro  # Mount training code as read-only
+      - ./eval:/app/eval:ro  # Mount evaluation code as read-only
     environment:
       - PYTHONPATH=/app
       - PYTHONUNBUFFERED=1
       - GEMINI_API_KEY=${GEMINI_API_KEY}
-    command: ["python", "-c", "from src.eval import evaluate_dataset; evaluate_dataset('/app/data/training_data_sft.jsonl', '/app/data/eval_results_sft.json', max_examples=20)"]
+    command: ["python", "-c", "from eval.eval import evaluate_dataset; evaluate_dataset('/app/data/training_data_sft.jsonl', '/app/data/eval_results_sft.json', max_examples=20)"]
     depends_on:
       - datagen
 
