@@ -1,6 +1,24 @@
-fusepy==3.0.1
-google-generativeai
-pytest==8.4.0
-transformers>=4.51.0
+# Core dependencies for LLM-based compression
 torch>=2.0.0
-modal
+transformers>=4.30.0
+numpy>=1.21.0
+
+# For Gemini API support (optional)
+google-generativeai>=0.3.0
+
+# For high-precision arithmetic
+fractions  # Built-in Python module
+
+# Additional utilities
+pickle-mixin>=1.0.2
+
+# Development and testing
+pytest>=7.0.0
+pytest-cov>=4.0.0
+
+# Optional: For VLLM support (if needed)
+# vllm>=0.2.0
+
+# Optional: For accelerated inference
+# accelerate>=0.20.0
+# bitsandbytes>=0.39.0

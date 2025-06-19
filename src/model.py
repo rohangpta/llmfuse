@@ -7,7 +7,7 @@ for generating predictions about filesystem operations and states.
 
 # Standard library imports
 import os
-from typing import Dict, Any, List, Optional, Union
+from typing import Dict, Any, List, Optional, Union, Tuple
 
 # Third-party imports
 import google.generativeai as genai
@@ -45,6 +45,8 @@ QWEN3_MODELS = {
     "qwen3-14b-base": "Qwen/Qwen3-14B-Base",
     "qwen3-30b-a3b-base": "Qwen/Qwen3-30B-A3B-Base",
 }
+
+# Import arithmetic coding components (will be imported when needed)
 
 
 def _is_huggingface_model(model_name: str) -> bool:
@@ -339,6 +341,108 @@ def get_available_qwen3_models() -> List[str]:
     return list(QWEN3_MODELS.keys())
 
 
+def get_tokenizer(model_name: str):
+    """
+    Get tokenizer for a given model.
+    
+    Args:
+        model_name: Name of the model
+        
+    Returns:
+        Tokenizer instance
+    """
+    try:
+        from transformers import AutoTokenizer
+    except ImportError:
+        raise ImportError("Transformers not installed. Run: pip install transformers torch")
+    
+    # Convert simplified model names to full HF model names
+    if model_name.lower() in QWEN3_MODELS:
+        model_name = QWEN3_MODELS[model_name.lower()]
+    
+    return AutoTokenizer.from_pretrained(model_name)
+
+
+def get_model(model_name: str):
+    """
+    Get model for a given model name.
+    
+    Args:
+        model_name: Name of the model
+        
+    Returns:
+        Model instance
+    """
+    try:
+        from transformers import AutoModelForCausalLM
+        import torch
+    except ImportError:
+        raise ImportError("Transformers not installed. Run: pip install transformers torch")
+    
+    # Convert simplified model names to full HF model names
+    if model_name.lower() in QWEN3_MODELS:
+        model_name = QWEN3_MODELS[model_name.lower()]
+    
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name, torch_dtype=torch.float32, device_map="cpu", trust_remote_code=True
+    )
+    model.eval()
+    return model
+
+
+def get_model_logprobs(context: str, model, tokenizer, verbose: bool = False) -> List[float]:
+    """
+    Get probability distribution for next token given context.
+    
+    Args:
+        context: Input context text
+        model: Pre-loaded model instance
+        tokenizer: Pre-loaded tokenizer instance
+        verbose: Whether to print debug information
+        
+    Returns:
+        List of probabilities for each token in vocabulary
+    """
+    try:
+        import torch
+        import torch.nn.functional as F
+        import numpy as np
+    except ImportError:
+        raise ImportError("PyTorch not installed. Run: pip install torch")
+    
+    try:
+        # Tokenize context
+        input_tokens = tokenizer.encode(context, return_tensors="pt").to(model.device)
+        
+        # Get model predictions
+        with torch.no_grad():
+            outputs = model(input_tokens)
+            logits = outputs.logits[0, -1, :]  # Get logits for last position
+            
+            # Convert to probabilities
+            probs = F.softmax(logits, dim=-1)
+            
+            # Apply minimal probability floor for arithmetic coding stability
+            probs_np = probs.cpu().numpy()
+            prob_floor = 1e-15
+            probs_np = np.maximum(probs_np, prob_floor)
+            
+            # Renormalize
+            probs_np = probs_np / probs_np.sum()
+            
+            if verbose:
+                # Show top predictions
+                top_indices = np.argsort(probs_np)[-5:][::-1]
+                top_tokens = [(idx, f"{probs_np[idx]:.6f}", repr(tokenizer.decode([idx]))) 
+                             for idx in top_indices]
+                print(f"[COMPRESSION DEBUG] Top 5 predicted tokens: {top_tokens}")
+            
+            return probs_np.tolist()
+    
+    except Exception as e:
+        raise Exception(f"Model prediction failed: {type(e).__name__}: {str(e)}")
+
+
 def print_available_models() -> None:
     """
     Print all available model options.
@@ -354,6 +458,171 @@ def print_available_models() -> None:
     print(
         "\nYou can also use any Hugging Face model name directly (e.g., 'microsoft/DialoGPT-medium')"
     )
+
+
+def compress_with_model_probs(text: str, model_name: str = "qwen3-0.6b", 
+                            max_tokens: int = 1000, verbose: bool = False) -> Tuple[bytes, Dict[str, Any]]:
+    """
+    Compress text using model-predicted probabilities with arithmetic coding.
+    
+    Args:
+        text: Input text to compress
+        model_name: Model to use for probability prediction
+        max_tokens: Maximum number of tokens to process
+        verbose: Whether to print debug information
+    
+    Returns:
+        Tuple of (compressed_bytes, metadata_dict)
+    """
+    if verbose:
+        print(f"[COMPRESSION DEBUG] Input text: {repr(text)}")
+    
+    # Tokenize input
+    tokenizer = get_tokenizer(model_name)
+    input_ids = tokenizer.encode(text, add_special_tokens=False)
+    
+    if len(input_ids) > max_tokens:
+        raise ValueError(f"Input has {len(input_ids)} tokens, exceeds max_tokens={max_tokens}")
+    
+    if verbose:
+        print(f"[COMPRESSION DEBUG] Input tokens: {input_ids}")
+        token_texts = [tokenizer.decode([token_id]) for token_id in input_ids]
+        print(f"[COMPRESSION DEBUG] Token texts: {token_texts}")
+    
+    # Use start token approach for consistent context
+    start_token = "<START>"
+    if verbose:
+        print(f"[COMPRESSION DEBUG] Using start token: {repr(start_token)}")
+    
+    # Get model probabilities for each token
+    probabilities = []
+    model = get_model(model_name)
+    
+    for i, token_id in enumerate(input_ids):
+        # Build context: start_token + tokens up to position i-1
+        if i == 0:
+            context = start_token
+        else:
+            # Decode previous tokens and append to start token
+            prev_tokens_text = tokenizer.decode(input_ids[:i], skip_special_tokens=True)
+            context = start_token + prev_tokens_text
+        
+        if verbose:
+            print(f"[COMPRESSION DEBUG] Position {i}: Using context {repr(context)} to predict token {token_id}")
+        
+        # Get probabilities from model
+        probs = get_model_logprobs(context, model, tokenizer, verbose=verbose)
+        probabilities.append(probs)
+        
+        # Debug: show what we're trying to compress
+        token_text = tokenizer.decode([token_id])
+        if verbose:
+            print(f"[COMPRESSION DEBUG] Token to compress: {token_id} ({repr(token_text)})")
+            
+            # Show target token probability
+            if token_id < len(probs):
+                target_prob = probs[token_id]
+                print(f"[COMPRESSION DEBUG] Target token probability: {target_prob:.10f}")
+            else:
+                print(f"[COMPRESSION DEBUG] Target token {token_id} not in vocabulary!")
+            
+            # Show distribution stats
+            print(f"[COMPRESSION DEBUG] Min probability in distribution: {min(probs):.10f}")
+            print(f"[COMPRESSION DEBUG] Max probability in distribution: {max(probs):.10f}")
+    
+    # Use arithmetic coding to compress
+    from .arithmetic_coding import ArithmeticCoder
+    coder = ArithmeticCoder()
+    
+    try:
+        compressed_bytes = coder.encode(input_ids, probabilities)
+    except Exception as e:
+        raise ValueError(f"Arithmetic coding failed: {e}")
+    
+    # Store metadata
+    metadata = {
+        'original_length': len(text),
+        'num_tokens': len(input_ids),
+        'model_name': model_name,
+        'start_token': start_token,
+        'compressed_length': len(compressed_bytes)
+    }
+    
+    return compressed_bytes, metadata
+
+
+def decompress_with_model_probs(compressed_bytes: bytes, metadata: Dict[str, Any], 
+                               verbose: bool = False) -> str:
+    """
+    Decompress bytes back to text using model-predicted probabilities.
+    
+    Args:
+        compressed_bytes: Compressed data
+        metadata: Metadata from compression
+        verbose: Whether to print debug information
+    
+    Returns:
+        Decompressed text
+    """
+    model_name = metadata['model_name']
+    num_tokens = metadata['num_tokens']
+    start_token = metadata['start_token']
+    
+    if verbose:
+        print(f"[DECOMPRESSION DEBUG] Starting with {num_tokens} compressed tokens")
+        print(f"[DECOMPRESSION DEBUG] Start token: {repr(start_token)}")
+    
+    # Get model and tokenizer
+    model = get_model(model_name)
+    tokenizer = get_tokenizer(model_name)
+    
+    # Use iterative arithmetic decoding to decode tokens one by one
+    # This allows us to use each decoded token to build the proper context for the next one
+    
+    from .arithmetic_coding import ArithmeticCoder
+    coder = ArithmeticCoder()
+    
+    # Initialize iterative decoding
+    coder.decode_iterative_init(compressed_bytes)
+    
+    decoded_token_ids = []
+    
+    for i in range(num_tokens):
+        # Build context using tokens decoded so far (same as encoding)
+        if i == 0:
+            context = start_token
+        else:
+            prev_tokens_text = tokenizer.decode(decoded_token_ids, skip_special_tokens=True)
+            context = start_token + prev_tokens_text
+        
+        if verbose:
+            print(f"[DECOMPRESSION DEBUG] Position {i}: Using context {repr(context)}")
+        
+        # Get probability distribution for this position (same as encoding)
+        probs = get_model_logprobs(context, model, tokenizer, verbose=False)
+        
+        # Decode the next token using this probability distribution
+        try:
+            token_id = coder.decode_iterative_next(probs)
+            decoded_token_ids.append(token_id)
+            
+            if verbose:
+                token_text = tokenizer.decode([token_id])
+                print(f"[DECOMPRESSION DEBUG] Decoded token {i}: {token_id} ({repr(token_text)})")
+                
+        except Exception as e:
+            raise ValueError(f"Iterative decoding failed at position {i}: {e}")
+    
+    if verbose:
+        print(f"[DECOMPRESSION DEBUG] Decoded token IDs: {decoded_token_ids}")
+    
+    # Convert tokens back to text
+    try:
+        # Remove the start token context by decoding just the actual tokens
+        decoded_text = tokenizer.decode(decoded_token_ids, skip_special_tokens=True)
+        return decoded_text
+    except Exception as e:
+        raise ValueError(f"Token decoding failed: {e}")
 
 
 def main() -> None:
