@@ -1,220 +1,153 @@
-# LLM-FUSE: A Filesystem for Stateful LLM Reasoning
+## LLM-FUSE: A Filesystem for Stateful LLM Reasoning
 
-This project is an experiment to determine if a Large Language Model (LLM) can be trained to perform robust, stateful reasoning. We use a mountable filesystem, implemented via FUSE, as a controlled and verifiable testbed for this capability.
+This project tests whether a Large Language Model (LLM) can perform robust, stateful reasoning. A mountable filesystem (via FUSE) serves as a controlled testbed. The core idea, "Full State Rewrite," tasks the LLM with applying a pure state transition: on each operation (e.g., `mkdir /new_dir`), the model receives the entire filesystem state (State_t) and must output the complete new state (State_{t+1}).
 
-The core methodology, termed "Full State Rewrite," tasks the LLM with executing a pure state transition function. On every turn, the model receives the entire textual representation of the current filesystem state (State_t) along with a single operation (e.g., `mkdir /new_dir`). Its objective is to output the new, complete, and perfectly accurate filesystem state (State_t+1).
+## Quickstart (Docker)
 
-## Installation
+Most workflows run inside Docker for FUSE support and consistent environments.
 
-1. Install uv (modern Python package manager):
-   ```bash
-   curl -LsSf https://astral.sh/uv/install.sh | sh
-   ```
+- **Prerequisites**: Docker and Docker Compose.
 
-2. Clone the repository:
-   ```bash
-   git clone <repository-url>
-   cd src
-   ```
-
-3. Install dependencies:
-   ```bash
-   uv sync
-   ```
-
-4. Set up your Gemini API key for evaluation:
-   ```bash
-   export GEMINI_API_KEY="your-api-key-here"
-   ```
-
-## Testing
-
-Run the test suite in Docker (required for Linux compatibility):
+### Generate training data
 
 ```bash
-docker-compose run --rm datagen pytest src/ -v
+# Build and run the FUSE-enabled data generator (writes to ./data/train)
+docker-compose up --build datagen
+
+# Or override defaults (examples count and output dir)
+docker-compose run --rm --privileged \
+  -e PYTHONUNBUFFERED=1 \
+  datagen python -m train.generate_data --num_examples 200 --output_dir /app/data/train
 ```
 
-## Data Generation
+Output files are JSONL with deterministic naming: `fuse_{num_samples}_{unixtime}.jsonl` in `data/train/`.
 
-Generate synthetic training data using the reference FUSE filesystem:
+### Evaluate a model on a dataset
+
+Set an API key if evaluating Gemini models:
 
 ```bash
-# Generate training data with CLI (Docker required for FUSE support)
-docker run --rm --privileged -v $(pwd):/app/host llmfuse-datagen \
-  python -m train.generate_data -n 100 -o /app/host/training_data.json
-
-# Or use docker-compose (generates 50 examples by default)
-docker-compose up datagen-fuse
-
-# Generate smaller test datasets
-docker run --rm --privileged -v $(pwd):/app/host llmfuse-datagen \
-  python -m train.generate_data -n 10 -o /app/host/test_data.json
-
-# On macOS (clean exit with Docker instructions)
-python -m train.generate_data --help
-# ERROR: This script requires FUSE support and cannot run natively on macOS.
-# Please use Docker instead: ...
+export GEMINI_API_KEY="your-api-key"
 ```
 
-**CLI Options:**
-- `-n, --num_examples`: Number of training examples to generate (default: 100)
-- `-o, --output`: Output JSON file path (default: training_data.json)
+Run the robust evaluator (points to a dataset generated above):
 
-The data generation creates `(State_t, Operation, State_t+1)` training triples with:
-- **Real FUSE operations**: `create()`, `mkdir()`, `readdir()`, `unlink()`, `rmdir()`, `chmod()`, `chown()`
-- **Actual FUSE call parameters**: `mode=0o100644`, file handles, timestamps
-- **Ground truth from reference_fuse.py**: Perfect filesystem state transitions
-- **Complete operation logs**: Full sequence of FUSE calls for debugging
+```bash
+docker-compose run --rm -e GEMINI_API_KEY=$GEMINI_API_KEY \
+  eval python eval/eval_main.py --data /app/data/train/fuse_200_1730000000.jsonl \
+  --model gemini --max-examples 50
+```
+
+Notes:
+- The compose service `eval` uses the same image as `datagen` and mounts project code. Pass `--data` explicitly.
+- Results are saved under `/app/data/eval` by default (mapped to `./data/eval`).
+
+## Running the FUSE filesystem (Linux only)
+
+Running the LLM-backed filesystem itself requires Linux with FUSE:
+
+```bash
+sudo apt-get update && sudo apt-get install -y fuse3 libfuse3-dev
+python -m pip install -r requirements.txt
+
+mkdir -p /tmp/fuse_mount
+python llmfuse/llmfuse.py /tmp/fuse_mount
+
+# Unmount when done
+fusermount -u /tmp/fuse_mount
+```
+
+- macOS: run data generation and evaluation in Docker. Mounting the FUSE filesystem directly on macOS is not supported in this repo.
+
+## Local development (optional)
+
+If you prefer local installs for non-FUSE tasks (e.g., editing, unit tests):
+
+```bash
+python -m pip install -r requirements.txt
+```
+
+You can also use `uv` if you like, but Docker is recommended for anything requiring FUSE.
+
+## Data generation details
+
+- Source: `train/generate_data.py`
+- Reference FUSE (ground truth): `train/reference_fuse.py` (loopback FS that logs operations)
+- Produces triples: `(initial_state, operation) -> result` where result is either the complete next filesystem tree (for state-changing ops) or a query response (e.g., directory listing, getattr fields).
+
+Key flags:
+- `--num_examples` (`-n`): number of examples to generate (default: 100)
+- `--output_dir`: output directory inside the container (default: `/app/data/train`)
 
 ## Evaluation
 
-Evaluate LLM performance on FUSE operation data:
-
-### Local Evaluation
-```bash
-# Set up API key (add to ~/.bash_profile for persistence)
-export GEMINI_API_KEY="your-api-key-here"
-
-# Generate test data and run evaluation
-source ~/.bash_profile
-docker run --rm --privileged -v $(pwd):/app/host -e GEMINI_API_KEY=$GEMINI_API_KEY llmfuse-datagen \
-  python -m train.generate_data -n 10 -o /app/host/test_data.json
-
-docker run --rm --privileged -v $(pwd):/app/host -e GEMINI_API_KEY=$GEMINI_API_KEY llmfuse-datagen \
-  python -c "from eval.eval import evaluate_dataset; evaluate_dataset('/app/host/test_data.json', '/app/host/eval_results.json', max_examples=10)"
-
-# Or use docker-compose for evaluation
-docker-compose run --rm -e GEMINI_API_KEY=$GEMINI_API_KEY eval-fuse
-```
-
-### Modal Cloud Evaluation
-```bash
-# Evaluate single model on cloud infrastructure
-modal run eval/modal_eval.py::eval_single_size --model-name="qwen3-4b"
-
-# Evaluate all practical model sizes
-modal run eval/modal_eval.py::eval_sizes
-
-# Test individual models
-modal run eval/modal_eval.py::test_qwen3_single_vllm --model-name="qwen3-8b"
-
-# Compare Gemini vs Qwen3 models
-modal run eval/modal_eval.py::compare_gemini_qwen3_vllm
-
-# Serve individual models
-modal run eval/modal_eval.py::serve_qwen3_4b
-modal run eval/modal_eval.py::serve_qwen3_8b
-
-# Analyze saved evaluation results
-modal run eval/modal_eval.py::analyze_eval_results --results-filename="eval_results_all_sizes.json"
-```
-
-**Expected Results (N=10 FUSE operations):**
-- **60% overall accuracy** - exactly as expected for this challenging task
-- **100% accuracy on state-changing operations** (mkdir, rmdir, chmod, chown)
-- **0% accuracy on query operations** (readdir) - these are much harder as they require understanding complex output formats
-
-**Sample Output:**
-```
-==================================================
-EVALUATION SUMMARY
-==================================================
-Total examples: 10
-Correct predictions: 6
-Overall accuracy: 60.00%
-
-Accuracy by operation type:
-  state_change: 100.00% (6/6)
-  query: 0.00% (0/4)
-
-Accuracy by operation:
-  mkdir: 100.00% (2/2)
-  chown: 100.00% (2/2)
-  rmdir: 100.00% (2/2)
-  readdir: 0.00% (0/4)
-```
-
-The results demonstrate that the LLM successfully learns filesystem state transitions from FUSE training data, achieving perfect accuracy on operations that modify filesystem state while struggling with complex query output formatting.
-
-## FUSE Filesystem
-
-### Running with Docker (Recommended)
+Robust evaluator with format-aware similarity:
 
 ```bash
-# Start FUSE filesystem
-docker-compose up fuse
-
-# Access filesystem in container
-docker-compose exec fuse /bin/bash
-# Inside container: filesystem mounted at /mnt/fuse
+python eval/eval_main.py --data data/train/fuse_100_1730000000.jsonl \
+  --model gemini --max-examples 50
 ```
 
-### Running Directly (Linux only)
+Highlights:
+- Handles mixed completion formats (filesystem trees, stat-like outputs, directory listings)
+- More tolerant similarity for format differences
+- Saves results to `data/eval/` by default (when run via Docker compose)
 
-1. Install FUSE:
-   ```bash
-   sudo apt-get install fuse3 libfuse3-dev
-   ```
-
-2. Create mount point and run:
-   ```bash
-   mkdir /tmp/fuse_mount
-   uv run python llmfuse.py /tmp/fuse_mount
-   ```
-
-3. Interact with `/dev/llm` device:
-   ```bash
-   echo "How many files are in the current directory?" > /tmp/fuse_mount/dev/llm
-   cat /tmp/fuse_mount/dev/llm
-   ```
-
-4. Unmount:
-   ```bash
-   fusermount -u /tmp/fuse_mount
-   ```
-
-## Training Methodology
-
-**Supervised Fine-Tuning (SFT)**: Train on synthetically generated `(State_t, Operation) -> State_t+1` examples to teach basic mechanics and output format.
-
-```bash
-# Prepare training data on Modal
-modal run train/modal_sft.py::prepare_training_data
-
-# Train Qwen models with distributed SFT
-modal run train/modal_sft.py::train_qwen --model-name="qwen3-8b"
-modal run train/modal_sft.py::train_qwen --model-name="qwen3-8b" --use-wandb
-
-# Test trained models
-modal run train/modal_sft.py::test_trained_model --model-path="qwen3-8b-sft-3epochs-distributed"
-
-# Comprehensive evaluation of trained models
-modal run train/modal_sft.py::eval_trained_model_comprehensive --model-path="qwen3-8b-sft-3epochs-distributed"
-```
-
+Typical small-sample results (10 examples):
+- 60% overall accuracy
+- 100% on state-changing operations (mkdir, rmdir, chmod, chown)
+- Lower accuracy on query-heavy tasks (e.g., readdir) due to formatting difficulty
 
 ## Architecture
 
-The experiment consists of two key components:
+- **Reference FUSE (ground truth)**: `train/reference_fuse.py`
+  - Loopback to a real directory, logs every FUSE call used to build datasets.
+- **LLM-backed FUSE**: `llmfuse/llmfuse.py`
+  - Maintains state as a text tree via `llmfuse/fs_state.py` and prompts an LLM to compute the next full state for each operation.
+- **Utilities**: `llmfuse/utils.py` (tree formatting constants, helpers)
+- **Evaluation**: `eval/eval_main.py` and helpers under `eval/`
 
-1. **Reference FUSE Implementation** (`src/reference_fuse.py`): Provides perfect ground truth by executing real filesystem operations and logging all FUSE calls. This generates the training data.
+## Compression (LLM-guided arithmetic coding)
 
-2. **LLM FUSE Implementation** (`src/llmfuse.py`): Routes ALL filesystem operations through an LLM, which must predict the complete new filesystem state for each operation. This is what gets trained and evaluated.
+The `llmencode` package demonstrates prediction–compression equivalence using arithmetic coding guided by model probabilities.
 
-The LLM filesystem deliberately has no built-in knowledge of filesystem semantics - it must learn everything from the training data generated by the reference implementation.
+CLI examples:
 
-## Compression
+```bash
+# Roundtrip test (recommended):
+python -m llmencode.llmencode test "Hello world" --model qwen3-4b
 
-We provide a `./llmencode` utility to perform arithmetic coding based
-compression, which leverages the prediction-compression equivalence and the
-semantic world knowledge of an LLM.
+# Encode to hex:
+python -m llmencode.llmencode encode "Some text" --model qwen3-4b --output-format hex
+```
 
-Use the `./llmencode` utility to compress arbitrary text data. This is used in
-the backend of the filesystem to store compressed data internally.
+Notes:
+- The standalone `decode` subcommand requires encoding metadata and will exit with an error message. Use the `test` subcommand for an end-to-end roundtrip in one process, or use the Python API to persist metadata.
 
-`./llmencode encode "hello this is a random string that I want to encode"
---save-metadata meta.json`
+Minimal Python API roundtrip:
 
-`./llmencode decode 'hex-encoded-data' --metadata meta.json`
+```python
+from llmencode import LLMEncode
+encoder = LLMEncode(model_name="qwen3-4b")
+stats = encoder.test_roundtrip("Hello world", verbose=True)
+```
+
+## Repository layout
+
+- `llmfuse/`: LLM-driven filesystem and state representation
+- `train/`: Reference FUSE and data generation
+- `eval/`: Evaluation pipelines (local and Modal support)
+- `llmencode/`: Arithmetic coding + LLM-guided compression
+- `common/`: Shared model utilities
+- `data/`: Generated datasets and evaluation outputs
+
+## Requirements
+
+Core dependencies are listed in `requirements.txt` (notably `fusepy`, `torch`, `transformers`). Gemini-based evaluation requires `google-generativeai` and a `GEMINI_API_KEY`.
+
+## Troubleshooting
+
+- **FUSE errors (macOS/Windows)**: Use Docker for data generation/evaluation. The live FUSE filesystem is supported on Linux only.
+- **Evaluation errors about `--data`**: Ensure you pass `--data` to the evaluator path inside the container (`/app/data/...`).
+- **Decode CLI**: Use `test` for roundtrip; standalone `decode` needs metadata from the same session.
 

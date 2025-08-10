@@ -14,7 +14,24 @@ from pathlib import Path
 from typing import Dict, Any, List
 
 # Local imports
-from .generate_data import generate_random_operation, execute_command
+# Import generate_data functions directly to avoid train package dependencies
+import importlib.util
+import os
+import sys
+
+# Add project root to path so llmfuse can be found
+project_root = os.path.dirname(os.path.dirname(__file__))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+
+spec = importlib.util.spec_from_file_location(
+    'generate_data', 
+    os.path.join(os.path.dirname(__file__), 'generate_data.py')
+)
+generate_data_module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(generate_data_module)
+generate_random_operation = generate_data_module.generate_random_operation
+execute_command = generate_data_module.execute_command
 from llmfuse.fs_state import FSState, FileEntry
 from llmfuse.utils import DEFAULT_FILE_MODE, DEFAULT_DIR_MODE
 

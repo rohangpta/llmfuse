@@ -22,4 +22,4 @@ RUN mkdir /mnt/fuse
 RUN echo "user_allow_other" >> /etc/fuse.conf
 
 # Run with FUSE device access
-ENTRYPOINT ["python", "src/mount_llmfuse.py", "/mnt/fuse"]
+ENTRYPOINT ["python", "-m", "llmfuse.llmfuse", "/mnt/fuse"]

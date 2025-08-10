@@ -21,7 +21,7 @@ import base64
 
 try:
     # When imported as a package
-    from src.model import get_model_logprobs, compress_with_model_probs, decompress_with_model_probs
+    from common.model import get_model_logprobs, compress_with_model_probs, decompress_with_model_probs
     from .arithmetic_coding import ArithmeticCoder, estimate_compression_ratio
 except ImportError:
     # When run directly, add parent directory to path
@@ -30,7 +30,7 @@ except ImportError:
     parent_dir = Path(__file__).parent.parent
     sys.path.insert(0, str(parent_dir))
     
-    from src.model import get_model_logprobs, compress_with_model_probs, decompress_with_model_probs
+    from common.model import get_model_logprobs, compress_with_model_probs, decompress_with_model_probs
     from llmencode.arithmetic_coding import ArithmeticCoder, estimate_compression_ratio
 
 
@@ -83,7 +83,7 @@ class LLMEncode:
     
     def _get_full_model_name(self) -> str:
         """Get the full HuggingFace model name."""
-        from src.model import QWEN3_MODELS
+        from common.model import QWEN3_MODELS
         if self.model_name.lower() in QWEN3_MODELS:
             return QWEN3_MODELS[self.model_name.lower()]
         return self.model_name

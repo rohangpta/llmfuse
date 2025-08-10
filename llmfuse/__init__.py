@@ -1,10 +1,10 @@
 """
 LLM-based FUSE filesystem package.
 
-This package provides the LLMFS filesystem implementation.
+This package provides the LLMFuse filesystem implementation.
 """
 
-from .llmfuse import LLMFS
+from .llmfuse import LLMFuse
 from .fs_state import FSState, FileEntry
 
-__all__ = ['LLMFS', 'FSState', 'FileEntry'] 
+__all__ = ['LLMFuse', 'FSState', 'FileEntry'] 

@@ -22,6 +22,7 @@ import sys
 import tempfile
 import threading
 import time
+from pathlib import Path
 from typing import Dict, List, Tuple, Any, Optional
 
 # Local imports
@@ -788,6 +789,20 @@ def generate_one(_worker_id: Optional[int] = None) -> Dict[str, Any]:
             else:
                 actual_operation = operation_type
             
+            # Determine operation string early for size checking
+            operation_str = shell_command  # Default fallback
+            if fuse_operation:
+                params = fuse_operation.get('parameters', {})
+                param_str = ""
+                if params:
+                    param_parts = []
+                    for key, value in params.items():
+                        param_parts.append(f"{key}={value}")
+                    param_str = ", " + ", ".join(param_parts)
+                
+                # Use consistent format without "FUSE" prefix
+                operation_str = f"{fuse_operation['operation']}('{fuse_operation['path']}'{param_str})"
+            
             if actual_operation in query_operations:
                 # QUERY OPERATIONS: Return specific query response
                 result = generate_query_response(actual_operation, fuse_operation, output, success, fs_state)
@@ -814,20 +829,7 @@ def generate_one(_worker_id: Optional[int] = None) -> Dict[str, Any]:
                     'skipped_due_to_size': True
                 }
             
-            # Use FUSE operation if available, otherwise fall back to shell command
-            if fuse_operation:
-                params = fuse_operation.get('parameters', {})
-                param_str = ""
-                if params:
-                    param_parts = []
-                    for key, value in params.items():
-                        param_parts.append(f"{key}={value}")
-                    param_str = ", " + ", ".join(param_parts)
-                
-                # Use consistent format without "FUSE" prefix
-                operation_str = f"{fuse_operation['operation']}('{fuse_operation['path']}'{param_str})"
-            else:
-                operation_str = shell_command
+# operation_str already defined above for size checking
             
             return {
                 'initial_state': initial_state,
@@ -993,14 +995,15 @@ def generate_batch(batch_size: int) -> List[Dict[str, Any]]:
     
     return examples
 
-def generate_data(num_examples: int = DEFAULT_NUM_EXAMPLES, output_file: Optional[str] = None, hf_format: bool = False) -> List[Dict[str, Any]]:
+def generate_data(num_examples: int = DEFAULT_NUM_EXAMPLES, output_dir: Optional[str] = None) -> List[Dict[str, Any]]:
     """
     Generate training data using FUSE operations with operation filtering.
     
+    Always saves in HuggingFace JSONL format with deterministic naming.
+    
     Args:
         num_examples: Number of training examples to generate
-        output_file: Path to output file (if None, returns data without saving)
-        hf_format: If True, save in HuggingFace JSONL format; if False, save structured JSON
+        output_dir: Directory to save output file (if None, returns data without saving)
         
     Returns:
         List of generated training examples (always in structured format)
@@ -1009,50 +1012,53 @@ def generate_data(num_examples: int = DEFAULT_NUM_EXAMPLES, output_file: Optiona
     print(f"📋 Filtering to useful operations: {', '.join(sorted(USEFUL_FUSE_OPERATIONS))}")
     print(f"🚫 Excluding noisy operations: {', '.join(sorted(EXCLUDED_FUSE_OPERATIONS))}")
     
-    # Use batched generation to reuse FUSE mounts (major performance improvement)
-    BATCH_SIZE = 20  # Generate 20 examples per FUSE mount
+    # Use individual generation to avoid FUSE mount deadlocks
+    # Batching with shared FUSE mounts causes hanging issues
     examples = []
     operation_counts = {}
     
-    for batch_start in range(0, num_examples, BATCH_SIZE):
-        batch_end = min(batch_start + BATCH_SIZE, num_examples)
-        batch_size = batch_end - batch_start
-        
-        print(f"📝 Generating batch {batch_start//BATCH_SIZE + 1}/{(num_examples + BATCH_SIZE - 1)//BATCH_SIZE} ({batch_start}-{batch_end-1})...")
-        
+    print(f"📝 Generating {num_examples} examples individually...")
+    
+    for i in range(num_examples):
         try:
-            batch_examples = generate_batch(batch_size)
-            examples.extend(batch_examples)
+            example = generate_one()
+            examples.append(example)
             
             # Track operation distribution from the actual operation string
-            for example in batch_examples:
-                operation_str = example.get('operation', '')
-                if '(' in operation_str:
-                    op_name = operation_str.split('(')[0]
-                    operation_counts[op_name] = operation_counts.get(op_name, 0) + 1
-                else:
-                    operation_counts['shell_command'] = operation_counts.get('shell_command', 0) + 1
+            operation_str = example.get('operation', '')
+            if '(' in operation_str:
+                op_name = operation_str.split('(')[0]
+                operation_counts[op_name] = operation_counts.get(op_name, 0) + 1
+            else:
+                operation_counts['shell_command'] = operation_counts.get('shell_command', 0) + 1
+            
+            print(f"  ✅ Generated example {len(examples)}/{num_examples}")
                 
         except Exception as e:
-            print(f"❌ Failed to generate batch {batch_start//BATCH_SIZE + 1}: {e}")
-            # Don't continue if FUSE operations are failing
-            raise
+            print(f"❌ Failed to generate example {i+1}: {e}")
+            # Continue with next example instead of failing completely
+            continue
     
     print(f"\n📊 Operation Distribution:")
     for op, count in sorted(operation_counts.items()):
         status = "✅" if op in USEFUL_FUSE_OPERATIONS else "🚫" if op in EXCLUDED_FUSE_OPERATIONS else "❓"
         print(f"  {status} {op}: {count}")
     
-    if output_file:
+    if output_dir:
+        # Create output directory and generate deterministic filename
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+        
+        # Generate deterministic filename: fuse_{num_samples}_{unixtime}.jsonl
+        unix_time = int(time.time())
+        filename = f"fuse_{num_examples}_{unix_time}.jsonl"
+        output_file = output_path / filename
+        
         print(f"\n💾 Writing {len(examples)} examples to {output_file}")
-        if hf_format:
-            print("📄 Using HuggingFace JSONL format")
-            save_hf_format(examples, output_file)
-        else:
-            print("📄 Using structured JSON format")
-            with open(output_file, 'w') as f:
-                json.dump(examples, f, indent=2)
+        print("📄 Using HuggingFace JSONL format")
+        save_hf_format(examples, str(output_file))
         print("✅ Data generation complete!")
+        print(f"📄 Output saved to: {output_file}")
     
     return examples
 
@@ -1078,42 +1084,12 @@ def convert_to_hf_format(examples: List[Dict[str, Any]]) -> List[Dict[str, str]]
         op_type = example['operation_type']
         
         if op_type == 'state_change':
-            # STATE-CHANGING OPERATIONS: Return complete filesystem state
-            prompt = f"""You are implementing a virtual filesystem backend service. You store filesystem state in context and serve filesystem operations on this virtual data. Given the current virtual filesystem state and an operation, return EXACTLY the new virtual filesystem state.
-
-Current virtual filesystem state:
-{current_state}
-
-Operation: {operation}
-
-CRITICAL REQUIREMENTS:
-- Return the COMPLETE virtual filesystem tree in EXACT same format as input
-- Use root:root for ownership (not user:user)
-- Preserve exact timestamp format: "Jun 14 17:57"
-- Include file sizes (e.g., "36 B", "0 B")
-- Use exact tree symbols: ├── └── │
-- If operation fails (file doesn't exist, etc.), return UNCHANGED state
-- NO extra text, just the virtual filesystem tree
-
-New virtual filesystem state:"""
+            # STATE MONAD: State -> Operation -> State
+            prompt = f"<W>\n{operation}\n---\n{current_state}"
         
         else:  # op_type == 'query'
-            # QUERY OPERATIONS: Return specific query response
-            prompt = f"""You are implementing a virtual filesystem backend service. You store filesystem state in context and serve filesystem operations on this virtual data. Given the current virtual filesystem state and a query operation, return the specific information requested.
-
-Current virtual filesystem state:
-{current_state}
-
-Query: {operation}
-
-CRITICAL REQUIREMENTS:
-- For readdir: Return JSON list of virtual directory entries: [".", "..", "file1.txt", "file2.txt"]
-- For getattr: Return JSON object with virtual file attributes: {{"mode": 644, "size": 1024, "type": "file", ...}}
-- For read: Return the virtual file contents as plain text
-- If operation fails, return "ERROR: <description>"
-- NO extra text, just the requested data
-
-Response:"""
+            # STATE QUERY: State -> Query -> Result
+            prompt = f"<R>\n{operation}\n---\n{current_state}"
         
         completion = example['result']
         
@@ -1141,12 +1117,14 @@ def save_hf_format(examples: List[Dict[str, Any]], output_file: str) -> None:
 def main():
     """Main CLI entry point."""
     parser = argparse.ArgumentParser(
-        description="Generate synthetic FUSE filesystem training data",
+        description="Generate synthetic FUSE filesystem training data with deterministic output naming",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python -m train.generate_data --num_examples 10 --output test_data.json
-  python -m train.generate_data -n 50 -o training_data.json
+  python -m train.generate_data --num_examples 100 --output_dir /app/data/train
+  python -m train.generate_data -n 1000 --output_dir ./data/train
+  
+Output files are automatically named: fuse_{num_samples}_{unixtime}.jsonl
         """
     )
     
@@ -1158,22 +1136,22 @@ Examples:
     )
     
     parser.add_argument(
-        '-o', '--output',
+        '--output_dir',
         type=str,
-        default='training_data.json',
-        help='Output file path (default: training_data.json)'
-    )
-    
-    parser.add_argument(
-        '--hf-format',
-        action='store_true',
-        help='Save in HuggingFace JSONL format instead of structured JSON'
+        default='/app/data/train',
+        help='Output directory for generated data (default: /app/data/train)'
     )
     
     args = parser.parse_args()
     
+    print(f"🚀 Starting FUSE data generation...")
+    print(f"📊 Samples: {args.num_examples}")
+    print(f"📁 Output directory: {args.output_dir}")
+    print(f"📋 Format: HuggingFace JSONL (deterministic naming)")
+    print()
+    
     # Generate the data
-    generate_data(num_examples=args.num_examples, output_file=args.output, hf_format=args.hf_format)
+    generate_data(num_examples=args.num_examples, output_dir=args.output_dir)
 
 if __name__ == "__main__":
     check_fuse_support()

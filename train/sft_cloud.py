@@ -1,18 +1,18 @@
+#!/usr/bin/env python3
 """
-Distributed training script for Qwen models using SFTTrainer.
-
-This script is executed by torchrun for multi-GPU distributed training.
-Based on Modal's multinode training guide patterns.
+Cloud-optimized training script for Qwen models using SFTTrainer.
+Designed for Modal's distributed training environment.
 """
 
+import argparse
+import json
 import os
 import sys
-import json
 import torch
 import torch.distributed as dist
+from datasets import Dataset
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from trl import SFTTrainer, SFTConfig
-from datasets import Dataset
 
 
 def setup_distributed():
@@ -29,14 +29,11 @@ def setup_distributed():
     print(f"Rank {os.environ.get('RANK', 0)} using GPU {torch.cuda.current_device()}")
 
 
-def load_training_data(train_split=0.9, output_dir="/root/output_models"):
+def load_training_data(training_data_path, train_split=0.9, output_dir="/root/output_models"):
     """Load and format training data with train/test split."""
-    training_data_path = "/root/training_data.jsonl"
-
+    
     if not os.path.exists(training_data_path):
-        raise FileNotFoundError(
-            "Training data not found. Please run prepare_training_data first."
-        )
+        raise FileNotFoundError(f"Training data not found: {training_data_path}")
 
     examples = []
     with open(training_data_path, "r") as f:
@@ -48,7 +45,6 @@ def load_training_data(train_split=0.9, output_dir="/root/output_models"):
 
     # Split into train/test
     import random
-
     random.seed(42)  # For reproducible splits
     random.shuffle(examples)
 
@@ -56,12 +52,11 @@ def load_training_data(train_split=0.9, output_dir="/root/output_models"):
     train_examples = examples[:split_idx]
     test_examples = examples[split_idx:]
 
-    print(
-        f"📊 Split: {len(train_examples)} train, {len(test_examples)} test ({train_split:.0%}/{1 - train_split:.0%})"
-    )
+    print(f"📊 Split: {len(train_examples)} train, {len(test_examples)} test ({train_split:.0%}/{1 - train_split:.0%})")
 
-    # Save test set for later evaluation (to the output volume)
-    test_data_path = f"{output_dir}/../test_data.jsonl"
+    # Save test set for later evaluation
+    os.makedirs(output_dir, exist_ok=True)
+    test_data_path = os.path.join(output_dir, "test_data.jsonl")
     with open(test_data_path, "w") as f:
         for example in test_examples:
             f.write(json.dumps(example) + "\n")
@@ -72,11 +67,10 @@ def load_training_data(train_split=0.9, output_dir="/root/output_models"):
 
 def main():
     """Main distributed training function."""
-    import argparse
-
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_name", type=str, required=True)
     parser.add_argument("--output_dir", type=str, required=True)
+    parser.add_argument("--training_data", type=str, required=True, help="Path to training data JSONL file")
     parser.add_argument("--num_epochs", type=int, default=3)
     parser.add_argument("--batch_size", type=int, default=2)
     parser.add_argument("--learning_rate", type=float, default=2e-5)
@@ -89,64 +83,48 @@ def main():
 
     # Model mapping
     model_mapping = {
-        "qwen3-0.6b": "Qwen/Qwen3-0.6B",
-        "qwen3-1.7b": "Qwen/Qwen3-1.7B",
-        "qwen3-4b": "Qwen/Qwen3-4B",
-        "qwen3-8b": "Qwen/Qwen3-8B",
-        "qwen3-14b": "Qwen/Qwen3-14B",
-        "qwen3-32b": "Qwen/Qwen3-32B",
+        "qwen3-0.6b": "Qwen/Qwen2.5-0.5B",          # Base model (no instruct)
+        "qwen3-1.7b": "Qwen/Qwen2.5-1.5B",          # Base model  
+        "qwen3-3b": "Qwen/Qwen2.5-3B",              # Base model
+        "qwen3-4b": "Qwen/Qwen3-4B",                # Actual Qwen3-4B model
+        "qwen3-8b": "Qwen/Qwen2.5-7B",              # Base model
+        "qwen3-14b": "Qwen/Qwen2.5-14B",            # Base model
+        "qwen3-32b": "Qwen/Qwen2.5-32B",            # Base model
     }
 
-    full_model_name = model_mapping.get(args.model_name, args.model_name)
+    if args.model_name not in model_mapping:
+        raise ValueError(f"Model {args.model_name} not supported. Choose from: {list(model_mapping.keys())}")
 
-    print(f"🚀 Starting distributed SFT training for {args.model_name}")
-    print(f"📦 Model: {full_model_name}")
-
-    if args.use_wandb and int(os.environ.get("RANK", 0)) == 0:
-        import wandb
-
-        wandb.init(
-            project="qwen3-filesystem-sft",
-            name=f"qwen-sft-{args.model_name}-{args.num_epochs}epochs-distributed",
-            config={
-                "model_name": args.model_name,
-                "full_model_name": full_model_name,
-                "num_epochs": args.num_epochs,
-                "batch_size": args.batch_size,
-                "learning_rate": args.learning_rate,
-                "distributed": True,
-                "num_gpus": torch.cuda.device_count(),
-            },
-        )
+    model_id = model_mapping[args.model_name]
+    print(f"🤖 Using model: {model_id}")
 
     # Load training data
     print("📁 Loading training data...")
-    dataset = load_training_data(output_dir=args.output_dir)
+    dataset = load_training_data(training_data_path=args.training_data, output_dir=args.output_dir)
     print(f"📊 Dataset size: {len(dataset)}")
 
-    # Load tokenizer
-    print("🔤 Loading tokenizer...")
+    # Load model and tokenizer
+    print("🔄 Loading model and tokenizer...")
     tokenizer = AutoTokenizer.from_pretrained(
-        full_model_name,
-        trust_remote_code=True,
-        cache_dir="/root/models",
+        model_id, 
+        trust_remote_code=True, 
+        use_fast=False,
+        padding_side="right",  # Required for causal LM
     )
-
+    
+    # Add pad token if it doesn't exist
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
+        tokenizer.pad_token_id = tokenizer.eos_token_id
 
-    # Load model
-    print("🤖 Loading model...")
+    # For distributed training, don't use device_map="auto"
     model = AutoModelForCausalLM.from_pretrained(
-        full_model_name,
-        trust_remote_code=True,
-        cache_dir="/root/models",
+        model_id,
         torch_dtype=torch.bfloat16,
+        trust_remote_code=True,
     )
 
-    print(f"📊 Model parameters: {model.num_parameters():,}")
-
-    # Disable KV caching for training (from Modal guide)
+    # Disable cache for training
     model.config.use_cache = False
 
     # Enable gradient checkpointing
@@ -178,7 +156,7 @@ def main():
         save_total_limit=3,
         save_strategy="steps",
         bf16=True,
-        max_seq_length=2048,
+        max_seq_length=512,  # Reduced for memory efficiency
         dataset_text_field="text",
         packing=False,
         report_to="wandb" if args.use_wandb else "none",
@@ -187,15 +165,25 @@ def main():
         else None,
         # Distributed training settings
         dataloader_pin_memory=False,
-        remove_unused_columns=False,
+        remove_unused_columns=True,  # Remove prompt/completion after creating text field
     )
 
+    # Transform dataset to have 'text' field that SFTTrainer expects
+    def add_text_field(example):
+        # Combine prompt and completion into single text field
+        example['text'] = f"{example['prompt']}\n{example['completion']}"
+        return example
+    
+    print("🔄 Transforming dataset for SFTTrainer...")
+    dataset = dataset.map(add_text_field)
+    
     # Initialize SFTTrainer
     print("🏋️ Initializing SFTTrainer...")
     trainer = SFTTrainer(
         model=model,
         train_dataset=dataset,
         args=sft_config,
+        tokenizer=tokenizer,
     )
 
     # Start training

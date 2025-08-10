@@ -17,7 +17,7 @@ from typing import Dict, List, Any, Optional
 from fuse import FUSE, FuseOSError, Operations, LoggingMixIn
 
 from .fs_state import FSState, FileEntry
-from src.model import get_model_response
+from common.model import get_model_response
 
 # Check if FUSE is available
 try:
@@ -26,7 +26,7 @@ try:
 except ImportError:
     FUSE_AVAILABLE = False
 
-class LLMFS(LoggingMixIn, Operations):
+class LLMFuse(LoggingMixIn, Operations):
     """
     A FUSE filesystem that uses an LLM to handle all operations.
     
@@ -421,13 +421,25 @@ Provide a helpful answer based on the current filesystem state:"""
         return dict(f_bsize=512, f_blocks=4096, f_bavail=2048)
 
 def main(mountpoint: str):
-    """Run the LLM-driven FUSE filesystem."""
+    """
+    Main entry point for the LLM-driven FUSE filesystem.
+    
+    Args:
+        mountpoint: Path where the filesystem should be mounted
+    """
     if not FUSE_AVAILABLE:
         print("Error: FUSE is not available. Please install libfuse.")
         print("On Ubuntu/Debian: sudo apt-get install fuse3 libfuse3-dev")
         sys.exit(1)
     
-    fs = LLMFS()
+    # Create mountpoint if it doesn't exist
+    if not os.path.exists(mountpoint):
+        os.makedirs(mountpoint)
+    
+    print(f"Mounting LLM-driven FUSE filesystem at {mountpoint}")
+    print("Press Ctrl+C to unmount")
+    
+    fs = LLMFuse()
     FUSE(fs, mountpoint, nothreads=True, foreground=True)
 
 if __name__ == '__main__':
