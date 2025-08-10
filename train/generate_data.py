@@ -25,8 +25,8 @@ import time
 from typing import Dict, List, Tuple, Any, Optional
 
 # Local imports
-from src.fs_state import FSState, FileEntry
-from src.utils import DEFAULT_FILE_MODE, DEFAULT_DIR_MODE
+from llmfuse.fs_state import FSState, FileEntry
+from llmfuse.utils import DEFAULT_FILE_MODE, DEFAULT_DIR_MODE
 
 # Generation constants
 MIN_SETUP_OPERATIONS = 2
@@ -36,24 +36,26 @@ MAX_FILE_SIZE = 500
 MIN_NESTED_DEPTH = 1
 MAX_NESTED_DEPTH = 4
 DEFAULT_NUM_EXAMPLES = 100
-FUSE_MOUNT_TIMEOUT = 15  # seconds to wait for FUSE mount
+FUSE_MOUNT_TIMEOUT = 30  # seconds to wait for FUSE mount
 BATCH_SIZE = 50  # Process in batches for better memory management
 
 # CORE FUSE operations we want to train on (filtering out noise)
-# Note: read/write operations excluded until explicitly implemented
+# Includes both state-changing and query operations for complete filesystem functionality
 USEFUL_FUSE_OPERATIONS = {
-    'getattr',    # Get file/directory attributes (stat-like)
-    'readdir',    # List directory contents
-    'mkdir',      # Create directory
-    'rmdir',      # Remove directory
-    'create',     # Create file
-    'unlink',     # Remove file
-    'chmod',      # Change permissions
-    'chown',      # Change ownership
-    'truncate',   # Change file size
-    'rename',     # Rename/move file
-    'symlink',    # Create symbolic link
-    'link',       # Create hard link
+    'getattr',    # Get file/directory attributes (stat-like) - QUERY
+    'readdir',    # List directory contents - QUERY  
+    'read',       # Read file contents - QUERY
+    'mkdir',      # Create directory - STATE CHANGE
+    'rmdir',      # Remove directory - STATE CHANGE
+    'create',     # Create file - STATE CHANGE
+    'write',      # Write to file - STATE CHANGE
+    'unlink',     # Remove file - STATE CHANGE
+    'chmod',      # Change permissions - STATE CHANGE
+    'chown',      # Change ownership - STATE CHANGE
+    'truncate',   # Change file size - STATE CHANGE
+    'rename',     # Rename/move file - STATE CHANGE
+    'symlink',    # Create symbolic link - STATE CHANGE
+    'link',       # Create hard link - STATE CHANGE
 }
 
 # Operations to EXCLUDE (too low-level or not useful for training)
@@ -73,33 +75,25 @@ EXCLUDED_FUSE_OPERATIONS = {
     'removexattr', # Remove extended attributes
 }
 
-# Balanced operation weights for random selection (more even distribution)
-# Note: write/read operations excluded until explicitly implemented
+# Balanced operation weights for random selection
+# Now includes read/write operations for complete filesystem functionality
 OPERATION_WEIGHTS = {
-    'mkdir': 0.14,      # Directory creation
-    'touch': 0.14,      # File creation (create)
-    'rm': 0.14,         # File removal (unlink)
-    'rmdir': 0.14,      # Directory removal
-    'chmod': 0.12,      # Permission changes
-    'chown': 0.12,      # Ownership changes
-    'truncate': 0.08,   # Truncate file
-    'rename': 0.08,     # Rename/move file
-    'symlink': 0.06,    # Create symbolic link
+    'mkdir': 0.12,      # Directory creation
+    'touch': 0.12,      # File creation (create)
+    'write': 0.12,      # Write to file
+    'read': 0.12,       # Read from file
+    'rm': 0.10,         # File removal (unlink)
+    'rmdir': 0.10,      # Directory removal
+    'chmod': 0.08,      # Permission changes
+    'chown': 0.08,      # Ownership changes
     'ls': 0.08,         # Directory listing (readdir)
-    'stat': 0.06,       # File information (getattr)
+    'stat': 0.08,       # File information (getattr)
+    'truncate': 0.06,   # Truncate file
+    'rename': 0.06,     # Rename/move file
+    'symlink': 0.06,    # Create symbolic link
 }
 
-# More realistic file content templates
-FILE_CONTENT_TEMPLATES = [
-    "#!/bin/bash\necho 'Hello World'\nexit 0",
-    "# Configuration file\nserver_port=8080\ndebug=true\nlog_level=info",
-    "import os\nimport sys\n\ndef main():\n    print('Python script')\n\nif __name__ == '__main__':\n    main()",
-    "Lorem ipsum dolor sit amet, consectetur adipiscing elit.",
-    "{\n  \"name\": \"example\",\n  \"version\": \"1.0.0\",\n  \"description\": \"Test file\"\n}",
-    "# README\n\nThis is a test file for filesystem operations.\n\n## Usage\n\nRun the commands as needed.",
-    "user:password:1000:1000:Test User:/home/user:/bin/bash",
-    "127.0.0.1 localhost\n192.168.1.1 gateway",
-]
+# Content templates are now generated dynamically based on file extensions
 
 def check_fuse_support() -> None:
     """
@@ -160,21 +154,83 @@ def generate_random_dirname() -> str:
     
     return f"{random.choice(names)}{suffix}{random.randint(1, 99) if random.random() < 0.5 else ''}"
 
-def generate_random_content() -> str:
-    """Generate more realistic file content."""
-    base_content = random.choice(FILE_CONTENT_TEMPLATES)
+def generate_random_content(filename: str = None) -> str:
+    """Generate content appropriate for the file extension."""
     
-    # Sometimes add extra realistic content
-    if random.random() < 0.4:
-        extra_lines = []
-        for i in range(random.randint(1, 3)):
-            extra_lines.append(f"# Additional line {i+1}")
-            if random.random() < 0.5:
-                extra_lines.append(f"value_{i} = {random.randint(1, 100)}")
-        
-        return base_content + "\n" + "\n".join(extra_lines)
+    # If no filename provided, generate generic content
+    if not filename:
+        return random.choice([
+            "# Configuration file\nserver_port=8080\ndebug=true\nlog_level=info",
+            "Lorem ipsum dolor sit amet, consectetur adipiscing elit.",
+            "user:password:1000:1000:Test User:/home/user:/bin/bash",
+            "127.0.0.1 localhost\n192.168.1.1 gateway",
+        ])
     
-    return base_content
+    # Generate content based on file extension
+    ext = os.path.splitext(filename)[1].lower()
+    
+    if ext == '.json':
+        # JSON files get JSON content
+        return """{
+  "name": "example",
+  "version": "1.0.0",
+  "description": "Test configuration file"
+}"""
+    
+    elif ext == '.py':
+        # Python files get Python content
+        return """import os
+import sys
+
+def main():
+    print('Python script executed')
+    return 0
+
+if __name__ == '__main__':
+    main()"""
+    
+    elif ext == '.sh':
+        # Shell scripts get shell content
+        return """#!/bin/bash
+echo 'Shell script executed'
+exit 0"""
+    
+    elif ext in ['.conf', '.cfg', '.config']:
+        # Config files get config content
+        return """# Configuration file
+server_port=8080
+debug=true
+log_level=info
+max_connections=100"""
+    
+    elif ext in ['.log']:
+        # Log files get log content
+        return """[INFO] 2025-01-01 10:00:00 - Application started
+[DEBUG] 2025-01-01 10:00:01 - Loading configuration
+[INFO] 2025-01-01 10:00:02 - Server ready on port 8080"""
+    
+    elif ext in ['.md']:
+        # Markdown files get markdown content
+        return """# README
+
+This is a test file for filesystem operations.
+
+## Usage
+
+Run the commands as needed."""
+    
+    elif ext in ['.yaml', '.yml']:
+        # YAML files get YAML content
+        return """name: example
+version: 1.0.0
+description: Test configuration
+debug: true"""
+    
+    else:
+        # Text files and others get plain text
+        return """Lorem ipsum dolor sit amet, consectetur adipiscing elit.
+This is sample text content for testing filesystem operations.
+Created for LLMFuse training data generation."""
 
 def get_random_existing_path(mount_dir: str) -> Optional[str]:
     """Get a random existing file or directory path."""
@@ -291,7 +347,7 @@ def generate_random_operation(mount_dir: str) -> Tuple[str, str]:
                 return 'truncate', f'truncate -s {size} {shlex.quote(existing_path)}'
             # Fallback to creating and truncating a file
             filename = generate_random_filename()
-            content = generate_random_content()
+            content = generate_random_content(filename)
             size = random.randint(0, 50)
             return 'truncate', f'echo {shlex.quote(content)} > {shlex.quote(filename)} && truncate -s {size} {shlex.quote(filename)}'
             
@@ -333,6 +389,29 @@ def generate_random_operation(mount_dir: str) -> Tuple[str, str]:
                 return 'stat', f'stat {shlex.quote(existing_path)}'
             # Fallback to stat root
             return 'stat', 'stat .'
+        
+        case 'write':
+            existing_path = get_random_existing_path(mount_dir)
+            if existing_path and os.path.isfile(os.path.join(mount_dir, existing_path)):
+                # Write to existing file
+                content = generate_random_content(existing_path)
+                return 'write', f'echo {shlex.quote(content)} > {shlex.quote(existing_path)}'
+            else:
+                # Create new file and write to it
+                filename = generate_random_filename()
+                content = generate_random_content(filename)
+                return 'write', f'echo {shlex.quote(content)} > {shlex.quote(filename)}'
+        
+        case 'read':
+            existing_path = get_random_existing_path(mount_dir)
+            if existing_path and os.path.isfile(os.path.join(mount_dir, existing_path)):
+                # Read from existing file
+                return 'read', f'cat {shlex.quote(existing_path)}'
+            else:
+                # Create a file and read from it
+                filename = generate_random_filename()
+                content = generate_random_content(filename)
+                return 'read', f'echo {shlex.quote(content)} > {shlex.quote(filename)} && cat {shlex.quote(filename)}'
             
         case _:
             # Default fallback
@@ -375,7 +454,6 @@ def start_fuse_filesystem(mount_dir: str, log_file: str) -> subprocess.Popen:
     Returns:
         Subprocess handle for the FUSE filesystem
     """
-    # Import here to avoid circular imports
     import sys
     python_path = sys.executable
     
@@ -384,7 +462,7 @@ def start_fuse_filesystem(mount_dir: str, log_file: str) -> subprocess.Popen:
     os.makedirs(root_dir, exist_ok=True)
     
     # Start the reference FUSE filesystem with loopback to root_dir
-    cmd = [python_path, '-m', 'src.reference_fuse', mount_dir, root_dir, log_file]
+    cmd = [python_path, '-m', 'train.reference_fuse', mount_dir, root_dir, log_file]
     
     process = subprocess.Popen(
         cmd,
@@ -434,6 +512,109 @@ def stop_fuse_filesystem(mount_dir: str, process: subprocess.Popen) -> None:
         process.kill()
         process.wait()
 
+
+def generate_query_response(operation: str, fuse_operation: Optional[Dict[str, Any]], 
+                           shell_output: str, success: bool, fs_state: FSState) -> str:
+    """
+    Generate appropriate response for query operations.
+    
+    This teaches the LLM to return specific query responses rather than complete filesystem trees.
+    
+    Args:
+        operation: Operation type ('readdir', 'getattr', 'read')
+        fuse_operation: FUSE operation details from log  
+        shell_output: Shell command output
+        success: Whether the operation succeeded
+        fs_state: Current filesystem state
+        
+    Returns:
+        Formatted query response appropriate for the operation type
+    """
+    if not success:
+        return f"ERROR: {shell_output}"
+    
+    path = fuse_operation.get('path', '/') if fuse_operation else '/'
+    
+    if operation == 'readdir':
+        # Return directory contents as a list
+        try:
+            # Extract directory entries from filesystem state
+            entries = ['.', '..']  # Always include parent references
+            
+            # Get relative path for state lookup
+            clean_path = path.strip('/')
+            if not clean_path:
+                # Root directory - get top-level entries
+                for file_path, entry in fs_state.state.items():
+                    if '/' not in file_path and file_path:
+                        entries.append(entry.name)
+            else:
+                # Subdirectory - get entries under this path
+                prefix = clean_path + '/'
+                for file_path, entry in fs_state.state.items():
+                    if file_path.startswith(prefix):
+                        relative = file_path[len(prefix):]
+                        if '/' not in relative:  # Direct child only
+                            entries.append(entry.name)
+            
+            # Return as JSON list for consistency
+            return json.dumps(entries)
+            
+        except Exception as e:
+            return f"ERROR: Failed to read directory {path}: {e}"
+    
+    elif operation == 'getattr':
+        # Return file/directory attributes
+        try:
+            clean_path = path.strip('/')
+            if clean_path in fs_state.state:
+                entry = fs_state.state[clean_path]
+                attrs = {
+                    'mode': entry.mode,
+                    'size': entry.size,
+                    'type': 'directory' if entry.is_dir else 'file',
+                    'mtime': entry.mtime,
+                    'owner': entry.owner,
+                    'group': entry.group
+                }
+                return json.dumps(attrs)
+            else:
+                return "ERROR: No such file or directory"
+                
+        except Exception as e:
+            return f"ERROR: Failed to get attributes for {path}: {e}"
+    
+    elif operation == 'read':
+        # Return file contents
+        try:
+            clean_path = path.strip('/')
+            if clean_path in fs_state.state:
+                entry = fs_state.state[clean_path]
+                if entry.is_dir:
+                    return "ERROR: Is a directory"
+                
+                # Read actual file content from filesystem
+                if fs_state.root_path:
+                    full_path = os.path.join(fs_state.root_path, clean_path) if clean_path else fs_state.root_path
+                    try:
+                        with open(full_path, 'r', encoding='utf-8') as f:
+                            content = f.read()
+                        return content
+                    except (UnicodeDecodeError, IOError) as e:
+                        return f"ERROR: Cannot read file {path}: {e}"
+                else:
+                    return "ERROR: No filesystem root available"
+            else:
+                return "ERROR: No such file or directory"
+                
+        except Exception as e:
+            return f"ERROR: Failed to read file {path}: {e}"
+    
+    else:
+        # Fallback for unknown query operations
+        return shell_output
+
+
 def filter_fuse_operations(operations: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
     Filter FUSE operations to only include useful ones for training.
@@ -469,17 +650,22 @@ def read_operation_log(log_file: str) -> List[Dict[str, Any]]:
         List of filtered operation log entries
     """
     operations = []
-    try:
-        with open(log_file, 'r') as f:
-            for line in f:
-                line = line.strip()
-                if line:
-                    try:
-                        operations.append(json.loads(line))
-                    except json.JSONDecodeError:
-                        continue
-    except FileNotFoundError:
-        pass
+    
+    # Early return for missing log file
+    if not os.path.exists(log_file):
+        return filter_fuse_operations([])
+    
+    # Parse log file
+    with open(log_file, 'r') as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            
+            try:
+                operations.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
     
     # Filter to only useful operations
     return filter_fuse_operations(operations)
@@ -487,6 +673,13 @@ def read_operation_log(log_file: str) -> List[Dict[str, Any]]:
 def generate_one(_worker_id: Optional[int] = None) -> Dict[str, Any]:
     """
     Generate a single training example using FUSE operations.
+    
+    Implements SMART DUAL TRAINING methodology:
+    - STATE-CHANGING operations: (State T, operation) → (State T+1) - Complete filesystem state
+    - QUERY operations: (State T, query) → Specific response - Directory contents, file attributes, etc.
+    
+    This teaches the LLM both state transitions AND proper query responses,
+    enabling a fully functional mountable filesystem.
     
     Creates a temporary mount point, starts a reference FUSE filesystem,
     performs random operations, and captures the FUSE operation calls
@@ -497,10 +690,11 @@ def generate_one(_worker_id: Optional[int] = None) -> Dict[str, Any]:
         
     Returns:
         Dictionary containing the training example with keys:
-        - 'initial_state': Tree representation of initial filesystem state
+        - 'initial_state': Tree representation of initial filesystem state (State T)
         - 'operation': The FUSE operation that was called
-        - 'result': Either new state tree or operation result
-        - 'operation_type': Type of operation (state-changing vs query)
+        - 'result': For state-changing: Complete filesystem state (State T+1)
+                   For queries: Specific response (directory contents, file attrs, file content)
+        - 'operation_type': 'state_change' or 'query'
     """
     with tempfile.TemporaryDirectory() as temp_base:
         mount_dir = os.path.join(temp_base, 'mount')
@@ -525,7 +719,7 @@ def generate_one(_worker_id: Optional[int] = None) -> Dict[str, Any]:
             # Create minimal files with content (reduced for speed)
             if random.random() < 0.5:  # Only 50% chance to create extra files
                 filename = generate_random_filename()
-                content = generate_random_content()
+                content = generate_random_content(filename)
                 file_path = os.path.join(mount_dir, filename)
                 try:
                     with open(file_path, 'w') as f:
@@ -533,10 +727,21 @@ def generate_one(_worker_id: Optional[int] = None) -> Dict[str, Any]:
                 except Exception:
                     pass
             
-            # Capture initial state
+            # Capture initial state with content and size limits
             fs_state = FSState(mount_dir)
             fs_state.sync_from_fs()
-            initial_state = fs_state.to_tree_string()
+            
+            # Start with conservative limits and adjust based on size
+            max_file_size = 300
+            max_tokens = 5000
+            
+            # Check initial size and adjust if needed
+            estimated_tokens = fs_state.estimate_token_count(include_contents=True, max_file_size=max_file_size)
+            if estimated_tokens > max_tokens * 0.6:  # If > 60% of limit
+                max_file_size = max(100, max_file_size // 2)
+                estimated_tokens = fs_state.estimate_token_count(include_contents=True, max_file_size=max_file_size)
+            
+            initial_state = fs_state.to_tree_string(include_contents=True, max_file_size=max_file_size)
             
             # Clear log before the operation we want to capture
             with open(log_file, 'w') as f:
@@ -562,16 +767,52 @@ def generate_one(_worker_id: Optional[int] = None) -> Dict[str, Any]:
                 else:
                     fuse_operation = logged_operations[-1]  # Fallback to last operation
             
-            # Determine result based on operation type
-            if operation_type in ['ls', 'stat']:
-                # Query operations: return the command output
-                result = output if success else f"Error: {output}"
+            # SMART DUAL TRAINING: Different operations need different responses
+            # State-changing ops → Complete filesystem state (State T → State T+1)  
+            # Query ops → Specific query responses (readdir contents, getattr data)
+            
+            fs_state.sync_from_fs()
+            
+            # Determine operation type based on what the operation actually does
+            query_operations = {'readdir', 'getattr', 'read'}
+            state_changing_operations = {'mkdir', 'create', 'unlink', 'rmdir', 'chmod', 'chown', 'truncate', 'rename', 'symlink', 'write'}
+            
+            # Check FUSE operation type if available, otherwise use shell command
+            actual_operation = None
+            if fuse_operation:
+                actual_operation = fuse_operation['operation']
+            elif operation_type in ['ls']:
+                actual_operation = 'readdir'
+            elif operation_type in ['stat']:
+                actual_operation = 'getattr'
+            else:
+                actual_operation = operation_type
+            
+            if actual_operation in query_operations:
+                # QUERY OPERATIONS: Return specific query response
+                result = generate_query_response(actual_operation, fuse_operation, output, success, fs_state)
                 op_type = "query"
             else:
-                # State-changing operations: return the new filesystem state
-                fs_state.sync_from_fs()
-                result = fs_state.to_tree_string()
+                # STATE-CHANGING OPERATIONS: Return complete filesystem state with contents
+                result = fs_state.to_tree_string(include_contents=True, max_file_size=max_file_size)
                 op_type = "state_change"
+            
+            # Final size check - skip if too large
+            total_content = initial_state + operation_str + result
+            final_tokens = len(total_content) // 4
+            if final_tokens > max_tokens:
+                print(f"Skipping example: total size {final_tokens} tokens exceeds limit {max_tokens}")
+                # Try generating a new example with different operations
+                # For now, return a minimal example
+                return {
+                    'initial_state': '/ dir 755 user:group Jan 01 00:00',
+                    'operation': 'touch(\'empty.txt\')',
+                    'result': '/ dir 755 user:group Jan 01 00:00\n└── empty.txt file 644 user:group Jan 01 00:00',
+                    'operation_type': 'state_change',
+                    'shell_command': 'touch empty.txt',
+                    'fuse_operations': [],
+                    'skipped_due_to_size': True
+                }
             
             # Use FUSE operation if available, otherwise fall back to shell command
             if fuse_operation:
@@ -637,7 +878,7 @@ def generate_batch(batch_size: int) -> List[Dict[str, Any]]:
                 # Create minimal files with content (reduced for speed)
                 if random.random() < 0.5:  # Only 50% chance to create extra files
                     filename = generate_random_filename()
-                    content = generate_random_content()
+                    content = generate_random_content(filename)
                     file_path = os.path.join(mount_dir, filename)
                     try:
                         with open(file_path, 'w') as f:
@@ -645,10 +886,21 @@ def generate_batch(batch_size: int) -> List[Dict[str, Any]]:
                     except Exception:
                         pass
                 
-                # Capture initial state
+                # Capture initial state with content and size limits
                 fs_state = FSState(mount_dir)
                 fs_state.sync_from_fs()
-                initial_state = fs_state.to_tree_string()
+                
+                # Start with conservative limits and adjust based on size
+                max_file_size = 300
+                max_tokens = 5000
+                
+                # Check initial size and adjust if needed
+                estimated_tokens = fs_state.estimate_token_count(include_contents=True, max_file_size=max_file_size)
+                if estimated_tokens > max_tokens * 0.6:  # If > 60% of limit
+                    max_file_size = max(100, max_file_size // 2)
+                    estimated_tokens = fs_state.estimate_token_count(include_contents=True, max_file_size=max_file_size)
+                
+                initial_state = fs_state.to_tree_string(include_contents=True, max_file_size=max_file_size)
                 
                 # Clear log before the operation we want to capture
                 with open(log_file, 'w') as f:
@@ -674,16 +926,42 @@ def generate_batch(batch_size: int) -> List[Dict[str, Any]]:
                     else:
                         fuse_operation = logged_operations[-1]  # Fallback to last operation
                 
-                # Determine result based on operation type
-                if operation_type in ['ls', 'stat']:
-                    # Query operations: return the command output
-                    result = output if success else f"Error: {output}"
+                # SMART DUAL TRAINING: Different operations need different responses
+                # State-changing ops → Complete filesystem state (State T → State T+1)  
+                # Query ops → Specific query responses (readdir contents, getattr data)
+                
+                fs_state.sync_from_fs()
+                
+                # Determine operation type based on what the operation actually does
+                query_operations = {'readdir', 'getattr', 'read'}
+                state_changing_operations = {'mkdir', 'create', 'unlink', 'rmdir', 'chmod', 'chown', 'truncate', 'rename', 'symlink', 'write'}
+                
+                # Check FUSE operation type if available, otherwise use shell command
+                actual_operation = None
+                if fuse_operation:
+                    actual_operation = fuse_operation['operation']
+                elif operation_type in ['ls']:
+                    actual_operation = 'readdir'
+                elif operation_type in ['stat']:
+                    actual_operation = 'getattr'
+                else:
+                    actual_operation = operation_type
+                
+                if actual_operation in query_operations:
+                    # QUERY OPERATIONS: Return specific query response
+                    result = generate_query_response(actual_operation, fuse_operation, output, success, fs_state)
                     op_type = "query"
                 else:
-                    # State-changing operations: return the new filesystem state
-                    fs_state.sync_from_fs()
-                    result = fs_state.to_tree_string()
+                    # STATE-CHANGING OPERATIONS: Return complete filesystem state with contents
+                    result = fs_state.to_tree_string(include_contents=True, max_file_size=max_file_size)
                     op_type = "state_change"
+                
+                # Size check for batch generation 
+                total_content = initial_state + (operation_str if 'operation_str' in locals() else shell_command) + result
+                final_tokens = len(total_content) // 4
+                if final_tokens > max_tokens:
+                    print(f"Skipping batch example {i}: size {final_tokens} tokens exceeds limit")
+                    continue
                 
                 # Use FUSE operation if available, otherwise fall back to shell command
                 if fuse_operation:
@@ -782,6 +1060,10 @@ def convert_to_hf_format(examples: List[Dict[str, Any]]) -> List[Dict[str, str]]
     """
     Convert structured training examples to HuggingFace format.
     
+    Implements SMART DUAL TRAINING format:
+    - STATE-CHANGING: (State T, operation) → State T+1
+    - QUERY: (State T, query) → Specific response
+    
     Args:
         examples: List of structured training examples
         
@@ -791,42 +1073,47 @@ def convert_to_hf_format(examples: List[Dict[str, Any]]) -> List[Dict[str, str]]
     hf_examples = []
     
     for example in examples:
-        # Construct the prompt (same logic as in LLMFS)
         current_state = example['initial_state']
         operation = example['operation']
+        op_type = example['operation_type']
         
-        # Extract operation and parameters for better formatting
-        if '(' in operation and ')' in operation:
-            op_name = operation.split('(')[0]
-            params_part = operation[operation.find('(')+1:operation.rfind(')')]
-            
-            prompt = f"""You are a filesystem. Given the current state and an operation, return EXACTLY the new filesystem state.
+        if op_type == 'state_change':
+            # STATE-CHANGING OPERATIONS: Return complete filesystem state
+            prompt = f"""You are implementing a virtual filesystem backend service. You store filesystem state in context and serve filesystem operations on this virtual data. Given the current virtual filesystem state and an operation, return EXACTLY the new virtual filesystem state.
 
-Current filesystem state:
+Current virtual filesystem state:
 {current_state}
 
 Operation: {operation}
 
 CRITICAL REQUIREMENTS:
-- Return the COMPLETE filesystem tree in EXACT same format as input
+- Return the COMPLETE virtual filesystem tree in EXACT same format as input
 - Use root:root for ownership (not user:user)
 - Preserve exact timestamp format: "Jun 14 17:57"
 - Include file sizes (e.g., "36 B", "0 B")
 - Use exact tree symbols: ├── └── │
 - If operation fails (file doesn't exist, etc.), return UNCHANGED state
-- NO extra text, just the filesystem tree
+- NO extra text, just the virtual filesystem tree
 
-New filesystem state:"""
-        else:
-            # Fallback for malformed operations
-            prompt = f"""You are a filesystem. Given the current state and an operation, return the new state.
+New virtual filesystem state:"""
+        
+        else:  # op_type == 'query'
+            # QUERY OPERATIONS: Return specific query response
+            prompt = f"""You are implementing a virtual filesystem backend service. You store filesystem state in context and serve filesystem operations on this virtual data. Given the current virtual filesystem state and a query operation, return the specific information requested.
 
-Current filesystem state:
+Current virtual filesystem state:
 {current_state}
 
-Operation: {operation}
+Query: {operation}
 
-New filesystem state:"""
+CRITICAL REQUIREMENTS:
+- For readdir: Return JSON list of virtual directory entries: [".", "..", "file1.txt", "file2.txt"]
+- For getattr: Return JSON object with virtual file attributes: {{"mode": 644, "size": 1024, "type": "file", ...}}
+- For read: Return the virtual file contents as plain text
+- If operation fails, return "ERROR: <description>"
+- NO extra text, just the requested data
+
+Response:"""
         
         completion = example['result']
         

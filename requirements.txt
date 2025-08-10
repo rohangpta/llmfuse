@@ -6,8 +6,11 @@ numpy>=1.21.0
 # For Gemini API support (optional)
 google-generativeai>=0.3.0
 
+# For FUSE filesystem support
+fusepy>=3.0.1
+
 # For high-precision arithmetic
-fractions  # Built-in Python module
+# fractions is a built-in Python module - no need to install
 
 # Additional utilities
 pickle-mixin>=1.0.2

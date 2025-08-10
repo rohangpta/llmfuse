@@ -4,6 +4,7 @@ LLM model interface for filesystem operation prediction.
 This module provides a clean interface to both Gemini and Hugging Face models
 for generating predictions about filesystem operations and states.
 """
+# HF model cache
 
 # Standard library imports
 import os
@@ -403,12 +404,9 @@ def get_model_logprobs(context: str, model, tokenizer, verbose: bool = False) ->
     Returns:
         List of probabilities for each token in vocabulary
     """
-    try:
-        import torch
-        import torch.nn.functional as F
-        import numpy as np
-    except ImportError:
-        raise ImportError("PyTorch not installed. Run: pip install torch")
+    import torch
+    import torch.nn.functional as F
+    import numpy as np
     
     try:
         # Tokenize context
@@ -443,21 +441,7 @@ def get_model_logprobs(context: str, model, tokenizer, verbose: bool = False) ->
         raise Exception(f"Model prediction failed: {type(e).__name__}: {str(e)}")
 
 
-def print_available_models() -> None:
-    """
-    Print all available model options.
-    """
-    print("Available Qwen3 models:")
-    for short_name, full_name in QWEN3_MODELS.items():
-        print(f"  {short_name:<20} -> {full_name}")
 
-    print("\nGemini models:")
-    print(f"  {DEFAULT_MODEL} (default)")
-    print("  Or any other Gemini model name starting with 'models/gemini'")
-
-    print(
-        "\nYou can also use any Hugging Face model name directly (e.g., 'microsoft/DialoGPT-medium')"
-    )
 
 
 def compress_with_model_probs(text: str, model_name: str = "qwen3-0.6b", 
@@ -531,7 +515,7 @@ def compress_with_model_probs(text: str, model_name: str = "qwen3-0.6b",
             print(f"[COMPRESSION DEBUG] Max probability in distribution: {max(probs):.10f}")
     
     # Use arithmetic coding to compress
-    from .arithmetic_coding import ArithmeticCoder
+    from llmencode.arithmetic_coding import ArithmeticCoder
     coder = ArithmeticCoder()
     
     try:
@@ -579,7 +563,7 @@ def decompress_with_model_probs(compressed_bytes: bytes, metadata: Dict[str, Any
     # Use iterative arithmetic decoding to decode tokens one by one
     # This allows us to use each decoded token to build the proper context for the next one
     
-    from .arithmetic_coding import ArithmeticCoder
+    from llmencode.arithmetic_coding import ArithmeticCoder
     coder = ArithmeticCoder()
     
     # Initialize iterative decoding
@@ -625,64 +609,3 @@ def decompress_with_model_probs(compressed_bytes: bytes, metadata: Dict[str, Any
         raise ValueError(f"Token decoding failed: {e}")
 
 
-def main() -> None:
-    """
-    Example usage of the model interface.
-
-    Demonstrates basic functionality with both Gemini and Hugging Face models.
-    """
-    print("=" * 60)
-    print("Model Interface Demo")
-    print("=" * 60)
-
-    # Show available models
-    print_available_models()
-    print("\n" + "=" * 60)
-
-    # Test prompt
-    prompt = "Hello! Can you explain what a filesystem is in simple terms?"
-    print(f"Test prompt: {prompt}")
-    print("\n" + "-" * 60)
-
-    # Test with Gemini (if API key is available)
-    if validate_api_key():
-        print("Testing with Gemini model...")
-        try:
-            response = get_model_response(prompt)
-            print(f"Gemini response: {response[:200]}...")
-        except Exception as e:
-            print(f"Gemini error: {e}")
-    else:
-        print("Gemini API key not configured. Skipping Gemini test.")
-
-    print("\n" + "-" * 60)
-
-    # Test with Qwen3 models (if transformers is available)
-    try:
-        import transformers
-
-        print("Testing with Qwen3 models...")
-
-        # Test different Qwen3 sizes
-        test_models = ["qwen3-0.6b", "qwen3-1.7b"]  # Start with smaller models
-
-        for model_name in test_models:
-            print(f"\nTesting {model_name}...")
-            try:
-                response = get_model_response(prompt, model_name=model_name)
-                print(f"{model_name} response: {response[:200]}...")
-            except Exception as e:
-                print(f"{model_name} error: {e}")
-
-    except ImportError:
-        print(
-            "Transformers not installed. Install with: pip install transformers torch"
-        )
-        print("To test Hugging Face models.")
-
-    print("\n" + "=" * 60)
-    print("Demo complete!")
-
-
-if __name__ == "__main__":
-    main()

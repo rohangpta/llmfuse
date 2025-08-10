@@ -698,14 +698,14 @@ def evaluate_single_example(example: Dict[str, Any]) -> Dict[str, Any]:
     """Evaluate a single example using the trained model."""
     try:
         # Create prompt for the trained model
-        prompt = f"""Given the filesystem state and operation, predict the result.
+        prompt = f"""Given the virtual filesystem state and operation, predict the result. You are implementing a virtual filesystem backend service that processes operations on virtual data stored in context.
 
-Initial filesystem state:
+Initial virtual filesystem state:
 {{example['initial_state']}}
 
 Operation: {{example['operation']}}
 
-Expected result format: {{'filesystem state tree' if example['operation_type'] == 'state_change' else 'command output'}}
+Expected result format: {{'virtual filesystem state tree' if example['operation_type'] == 'state_change' else 'command output'}}
 
 Result:"""
         

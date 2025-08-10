@@ -216,5 +216,5 @@ the backend of the filesystem to store compressed data internally.
 `./llmencode encode "hello this is a random string that I want to encode"
 --save-metadata meta.json`
 
-`./llmencode decode 'base64-encoded-data' --metadata meta.json`
+`./llmencode decode 'hex-encoded-data' --metadata meta.json`
 

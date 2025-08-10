@@ -20,8 +20,12 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy the source code
+# Copy all the source packages
 COPY src/ ./src/
+COPY llmfuse/ ./llmfuse/
+COPY llmencode/ ./llmencode/
+COPY train/ ./train/
+COPY eval/ ./eval/
 
 # Create a non-root user for safer operations
 RUN useradd -m -u 1000 appuser && \
