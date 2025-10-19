@@ -187,7 +187,16 @@ class LoggingLoopbackFS(LoggingMixIn, Operations):
 
     def write(self, path, data, offset, fh):
         """Write to a file."""
-        self._log_operation('write', path.replace(self.root, ''), data_length=len(data), offset=offset, fh=fh)
+        # Decode data and truncate if too long (keep training examples manageable)
+        try:
+            data_str = data.decode('utf-8', errors='replace')
+            if len(data_str) > 500:
+                data_str = data_str[:500] + '...[truncated]'
+        except Exception:
+            data_str = f'<binary data, {len(data)} bytes>'
+        
+        self._log_operation('write', path.replace(self.root, ''), 
+                          data=data_str, data_length=len(data), offset=offset, fh=fh)
         with self.rwlock:
             os.lseek(fh, offset, 0)
             return os.write(fh, data)
