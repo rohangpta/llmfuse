@@ -16,8 +16,12 @@ from typing import Dict, Any, List, Optional
 from pathlib import Path
 import re
 
-# Define the Modal app
-app = modal.App("qwen3-sft-training")
+# Define the Modal app (stub for older Modal versions)
+try:
+    app = modal.App("qwen3-sft-training")
+except AttributeError:
+    # Fallback for older Modal versions
+    app = modal.Stub("qwen3-sft-training")
 
 # Create Modal Volumes
 model_cache = modal.Volume.from_name("qwen3-model-cache", create_if_missing=True)
@@ -33,15 +37,8 @@ MODEL_CACHE_PATH = "/root/models"
 TRAINING_DATA_PATH = "/root/training_data"
 OUTPUT_MODEL_PATH = "/root/output_models"
 
-# Qwen3 model sizes mapping (same as in modal_run.py)
-QWEN3_MODELS = {
-    "qwen3-0.6b": "Qwen/Qwen3-0.6B",
-    "qwen3-1.7b": "Qwen/Qwen3-1.7B",
-    "qwen3-4b": "Qwen/Qwen3-4B",
-    "qwen3-8b": "Qwen/Qwen3-8B",
-    "qwen3-14b": "Qwen/Qwen3-14B",
-    "qwen3-32b": "Qwen/Qwen3-32B",
-}
+# Qwen model mapping – trimmed to the only supported size.
+QWEN3_MODELS = {"qwen3-4b": "Qwen/Qwen3-4B"}
 
 EXCLUDED_FUSE_OPERATIONS = {
     'release','flush','fsync','utimens','access','open','opendir','releasedir',
@@ -83,6 +80,7 @@ image = (
     .add_local_dir("llmfuse", "/root/llmfuse")
     .add_local_dir("llmencode", "/root/llmencode")
     .add_local_dir("data", "/root/data")  # Add training data to image
+    .add_local_dir("eval", "/root/eval")  # Add eval utilities for evaluation
     .add_local_file("train/sft_cloud.py", "/root/sft_cloud.py")
 )
 
@@ -183,6 +181,7 @@ def train_qwen(
     batch_size: int = 2,  # Reduced per-device batch size for multi-GPU
     learning_rate: float = 2e-5,
     gradient_checkpointing: bool = True,
+    resume_from: str | None = None,
 ):
     """
     Distributed training of Qwen models using torchrun and SFTTrainer.
@@ -268,6 +267,13 @@ def train_qwen(
             "--learning_rate",
             str(learning_rate),
         ]
+
+        if resume_from:
+            # Ensure absolute path inside container
+            resume_path = resume_from
+            if not resume_from.startswith("/"):
+                resume_path = f"{OUTPUT_MODEL_PATH}/{resume_from}"
+            torchrun_args.extend(["--resume_from", resume_path])
 
         if use_wandb:
             torchrun_args.append("--use_wandb")
@@ -1177,89 +1183,7 @@ def download_model_locally(model_path: str = "qwen3-4b-sft-1epochs-distributed",
     return str(final_model_path)
 
 
-@app.function(
-    volumes={OUTPUT_MODEL_PATH: trained_models_volume},
-    timeout=5 * 60,
-)
-def _list_models():
-    import os
-    models = []
-    if os.path.exists(OUTPUT_MODEL_PATH):
-        for item in os.listdir(OUTPUT_MODEL_PATH):
-            model_path = os.path.join(OUTPUT_MODEL_PATH, item)
-            if os.path.isdir(model_path):
-                # Get model info
-                size = 0
-                file_count = 0
-                for root, dirs, files in os.walk(model_path):
-                    for file in files:
-                        file_path = os.path.join(root, file)
-                        size += os.path.getsize(file_path)
-                        file_count += 1
-                
-                models.append({
-                    "name": item,
-                    "size_mb": size / (1024 * 1024),
-                    "file_count": file_count
-                })
-    return models
-
-
-@app.local_entrypoint()
-def list_trained_models():
-    """
-    List all available trained models in the Modal volume.
-    
-    Usage:
-        modal run train/sft_modal.py::list_trained_models
-    """
-    models = _list_models.remote()
-    
-    print("📋 Available trained models:")
-    if not models:
-        print("   No models found.")
-    else:
-        for model in models:
-            print(f"   📦 {model['name']}")
-            print(f"      Size: {model['size_mb']:.1f} MB")
-            print(f"      Files: {model['file_count']}")
-            print()
-    
-    return models
-
-
-@app.function(
-    image=image,
-    volumes={
-        OUTPUT_MODEL_PATH: trained_models_volume,
-    },
-    timeout=5 * 60,
-)
-def _read_output_models_file(filename: str) -> bytes:
-    import os
-    full_path = f"{OUTPUT_MODEL_PATH}/{filename}"
-    if not os.path.exists(full_path):
-        available = []
-        if os.path.exists(OUTPUT_MODEL_PATH):
-            available = os.listdir(OUTPUT_MODEL_PATH)
-        raise FileNotFoundError(f"{full_path} not found. Available: {available}")
-    with open(full_path, "rb") as f:
-        return f.read()
-
-
-@app.local_entrypoint()
-def download_eval_results_file(filename: str, local_dir: str = "./eval_results"):
-    """Download a file from /root/output_models (Modal volume) to local disk."""
-    import os
-    os.makedirs(local_dir, exist_ok=True)
-    data = _read_output_models_file.remote(filename)
-    local_path = os.path.join(local_dir, filename)
-    with open(local_path, "wb") as f:
-        f.write(data)
-    print(f"✅ Saved to {local_path}")
-    return local_path
-
-
+# Minimal evaluation entrypoint (kept here to ensure stable execution on Modal)
 @app.function(
     image=image,
     gpu="H100",
@@ -1271,56 +1195,50 @@ def download_eval_results_file(filename: str, local_dir: str = "./eval_results")
     secrets=[modal.Secret.from_name("huggingface-secret")],
 )
 def eval_on_dataset(model_path: str, dataset_path: str, max_examples: int | None = None):
-    """Evaluate a trained model on a specific dataset file (raw prompts)."""
     import os, json
     from datetime import datetime
     from transformers import AutoModelForCausalLM, AutoTokenizer
-    import torch, re
+    import torch
 
-    print(f"🧪 Evaluating {model_path} on {dataset_path}")
-
-    full_model_path = f"{OUTPUT_MODEL_PATH}/{model_path}"
-    full_dataset_path = f"/root/{dataset_path}"
+    full_model_path = f"{OUTPUT_MODEL_PATH}/{model_path}" if not model_path.startswith("/") else model_path
+    full_dataset_path = f"/root/{dataset_path}" if not dataset_path.startswith("/") else dataset_path
 
     if not os.path.exists(full_model_path):
         raise ValueError(f"Model not found at: {full_model_path}")
     if not os.path.exists(full_dataset_path):
         raise ValueError(f"Dataset not found at: {full_dataset_path}")
 
-    examples = []
-    with open(full_dataset_path, "r") as f:
-        for line in f:
-            if line.strip():
-                examples.append(json.loads(line.strip()))
-    if max_examples is not None and len(examples) > max_examples:
-        examples = examples[:max_examples]
-    print(f"📊 Loaded {len(examples)} examples")
+    print(f"🧪 Evaluating {full_model_path} on {full_dataset_path}")
 
-    def strip_think(text: str) -> str:
-        # Remove closed or unclosed <think> blocks
-        text = re.sub(r"<think>[\s\S]*?(</think>|$)", "", text, flags=re.IGNORECASE)
-        return text.strip()
+    # GPU visibility log
+    print(f"[EVAL] CUDA available: {torch.cuda.is_available()}, device_count={torch.cuda.device_count()}")
 
-    def maybe_trim_tree(predicted: str, expected: str) -> str:
-        # Only trim to tree root if expected clearly looks like a tree
-        if expected.lstrip().startswith('/'):
-            # Keep from first line starting with '/'
-            lines = predicted.splitlines()
-            for i, line in enumerate(lines):
-                if line.strip().startswith('/'):
-                    return "\n".join(lines[i:]).strip()
-        return predicted
-
-    print("🔤 Loading tokenizer and model...")
     tokenizer = AutoTokenizer.from_pretrained(full_model_path)
     model = AutoModelForCausalLM.from_pretrained(
         full_model_path, torch_dtype=torch.bfloat16, device_map="auto"
     )
     model.eval()
+    try:
+        print(f"[EVAL] Model device: {next(model.parameters()).device}")
+    except Exception:
+        pass
+
+    # Load examples
+    examples = []
+    with open(full_dataset_path, "r") as f:
+        for line in f:
+            if line.strip():
+                examples.append(json.loads(line))
+    if max_examples is not None:
+        examples = examples[:max_examples]
+    print(f"📊 Loaded {len(examples)} examples")
 
     results = []
-    exact = 0
     correct = 0
+    exact = 0
+
+    from eval.postprocess import sanitize_by_expected
+    from eval.metrics import exact_match as em_fn, simple_similarity as sim_fn
 
     for i, ex in enumerate(examples):
         if (i + 1) % 10 == 0:
@@ -1328,47 +1246,34 @@ def eval_on_dataset(model_path: str, dataset_path: str, max_examples: int | None
         prompt = ex["prompt"]
         expected = ex["completion"]
 
-        try:
-            inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=2048).to(model.device)
-            with torch.no_grad():
-                outputs = model.generate(
-                    **inputs,
-                    max_new_tokens=512,
-                    do_sample=False,
-                    temperature=0.0,
-                    pad_token_id=tokenizer.eos_token_id,
-                    num_beams=1,
-                )
-            predicted = tokenizer.decode(outputs[0], skip_special_tokens=True)
-            # Keep only the newly generated continuation after the prompt
-            predicted = predicted[len(prompt):].strip()
-            predicted = strip_think(predicted)
-            predicted = maybe_trim_tree(predicted, expected)
+        inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=2048).to(model.device)
+        with torch.no_grad():
+            outputs = model.generate(
+                **inputs,
+                max_new_tokens=1024,
+                do_sample=False,
+                temperature=0.0,
+                pad_token_id=tokenizer.eos_token_id,
+                eos_token_id=tokenizer.eos_token_id,
+                num_beams=1,
+            )
+        decoded = tokenizer.decode(outputs[0], skip_special_tokens=True)
+        predicted = sanitize_by_expected(decoded[len(prompt):].strip(), expected)
 
-            sim = calculate_simple_similarity(predicted, expected)
-            is_correct = sim > 0.7
-            if is_correct:
-                correct += 1
-            if predicted.strip() == expected.strip():
-                exact += 1
-
-            results.append({
-                "prompt": prompt,
-                "expected": expected,
-                "predicted": predicted,
-                "similarity": sim,
-                "correct": is_correct,
-                "exact": predicted.strip() == expected.strip(),
-            })
-        except Exception as e:
-            results.append({
-                "prompt": prompt,
-                "expected": expected,
-                "predicted": f"Error: {e}",
-                "similarity": 0.0,
-                "correct": False,
-                "exact": False,
-            })
+        sim = sim_fn(predicted, expected)
+        ex_match = em_fn(predicted, expected)
+        if sim > 0.7:
+            correct += 1
+        if ex_match:
+            exact += 1
+        results.append({
+            "prompt": prompt,
+            "expected": expected,
+            "predicted": predicted,
+            "similarity": sim,
+            "correct": sim > 0.7,
+            "exact": ex_match,
+        })
 
     acc = correct / len(examples) if examples else 0.0
     exact_acc = exact / len(examples) if examples else 0.0
@@ -1389,9 +1294,9 @@ def eval_on_dataset(model_path: str, dataset_path: str, max_examples: int | None
         }, f, indent=2)
     trained_models_volume.commit()
 
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("🎯 DATASET EVAL RESULTS")
-    print("="*60)
+    print("=" * 60)
     print(f"📦 Model: {model_path}")
     print(f"🗂 Dataset: {dataset_path}")
     print(f"📊 Examples: {len(examples)}")
@@ -1399,13 +1304,7 @@ def eval_on_dataset(model_path: str, dataset_path: str, max_examples: int | None
     print(f"🎯 Exact match: {exact_acc:.1%}")
     print(f"📈 Avg similarity: {avg_sim:.3f}")
     print(f"💾 Saved to: {out_name}")
-    return {
-        "results_file": out_name,
-        "accuracy": acc,
-        "exact_accuracy": exact_acc,
-        "average_similarity": avg_sim,
-    }
-
+    return {"results_file": out_name, "accuracy": acc, "exact_accuracy": exact_acc, "average_similarity": avg_sim}
 
 @app.local_entrypoint()
 def main():

@@ -2,7 +2,7 @@
 
 This project trains a Large Language Model to act as a filesystem, testing whether LLMs can perform robust, stateful reasoning. A mountable filesystem (via FUSE) serves as a controlled testbed. The core idea, "Full State Rewrite," tasks the LLM with applying a pure state transition: on each operation (e.g., `mkdir /new_dir`), the model receives the entire filesystem state (State_t) and must output the complete new state (State_{t+1}).
 
-**Current Performance:** A fine-tuned `qwen3-4b` model achieves **78% accuracy** on filesystem operations after training on 2,000 diverse examples.
+**Current Performance (Oct 2025):** The latest `qwen3-4b-sft-8epochs-distributed` checkpoint trained on a 10 000-sample targeted dataset reaches **98 % accuracy**, **68 % exact match**, and **0.977 average similarity** on the focused 100-example eval split (`data/eval/fuse_100_1760993121.jsonl`). A broader 200-example regression set sits at 87 % / 54 % with the same model. The remaining 32/100 near misses are dominated by literal-copy drift (e.g. READs paraphrasing headings or TRUNCATE ops swapping `[TRACE]` for `[INFO]` even though byte lengths match), plus two real failures: one READ collapsing a five-line log to `[ERROR]` and one READDIR hallucinating an extra entry.
 
 > **For AI Agents:** See [`AGENTS.md`](./AGENTS.md) for a comprehensive guide to the training pipeline, data format, and current state of the project.
 
@@ -17,11 +17,11 @@ Most workflows run inside Docker for FUSE support and consistent environments.
 **Recommended (docker-compose):**
 
 ```bash
-# Generate 5000 high-quality examples (takes 2-3 hours)
+# Generate 10k high-quality examples with targeted coverage (~5 hours)
 docker-compose run --rm datagen python3 -m train.generate_data \
-  -n 5000 \
+  --num_examples 10000 \
   --output_dir /app/data/train \
-  --targeted_prob 0.05
+  --targeted_prob 0.3
 ```
 
 **Alternative (docker run):**
@@ -39,12 +39,12 @@ docker run --rm \
   -e PYTHONUNBUFFERED=1 \
   -v "$(pwd)/data:/app/data" \
   llmfuse:latest \
-  python -m train.generate_data --num_examples 5000 --output_dir /app/data/train --targeted_prob 0.05
+  python -m train.generate_data --num_examples 10000 --output_dir /app/data/train --targeted_prob 0.3
 ```
 
 **Key parameters:**
-- `-n / --num_examples`: Number of examples to generate (recommended: 5000+)
-- `--targeted_prob`: Fraction of examples targeting edge cases (default: 0.25, recommended: 0.05)
+- `--num_examples`: Number of examples to generate (current best: 10 000)
+- `--targeted_prob`: Fraction of edge-case prompts (current best: 0.3 for read/readdir heavy mix)
 - `--output_dir`: Output directory inside container
 
 **Data quality features:**
@@ -57,64 +57,28 @@ Output files are JSONL with deterministic naming: `fuse_{num_samples}_{unixtime}
 
 ### Evaluate a model on a dataset
 
-Set an API key if evaluating Gemini models:
-
-```bash
-export GEMINI_API_KEY="your-api-key"
-```
-
-- Local evaluation (outside Docker):
-
-```bash
-python -m eval.cli --model-path ./models/qwen3-0.6b-test \
-  --dataset-path data/train/fuse_200_1730000000.jsonl \
-  --limit 50 \
-  --save-to eval_results/local_eval.json
-```
-
-- Docker Compose evaluation (mounts your `models/` and `data/`):
-
-```bash
-# Build services
-docker-compose build
-
-# Run eval (override env with your paths)
-MODEL_PATH=./models/qwen3-0.6b-test \
-DATASET_PATH=./data/train/fuse_200_1730000000.jsonl \
-LIMIT=50 \
-SAVE_TO=./data/eval/local_eval.json \
-docker-compose run --rm eval
-```
-
-- Modal evaluation (evaluate a trained model saved in a Modal volume on a dataset in the repo):
+Evaluation is now Modal-first. Use the pre-generated 100-example stress test for quick regression checks:
 
 ```bash
 modal run eval/modal_eval.py::eval_on_dataset \
-  --model-path "qwen3-4b-sft-1epochs-distributed" \
-  --dataset-path "data/train/fuse_200_1730000000.jsonl" \
-  --max-examples 50
+  --model-path "qwen3-4b-sft-8epochs-distributed" \
+  --dataset-path "data/eval/fuse_100_1760993121.jsonl" \
+  --max-examples 100
 ```
 
-Notes:
-- Results are saved under Modal volume `/root/output_models` (use `eval/modal_eval.py::download_eval_results_file` to download),
-  and local eval saves to `eval_results/` by default when you pass `--save-to`.
-
-## Running the FUSE filesystem (Linux only)
-
-Running the LLM-backed filesystem itself requires Linux with FUSE:
+To download the JSON metrics afterwards:
 
 ```bash
-sudo apt-get update && sudo apt-get install -y fuse3 libfuse3-dev
-python -m pip install -r requirements.txt
-
-mkdir -p /tmp/fuse_mount
-python llmfuse/llmfuse.py /tmp/fuse_mount
-
-# Unmount when done
-fusermount -u /tmp/fuse_mount
+modal run eval/modal_eval.py::download_eval_results_file \
+  --filename "custom_eval_qwen3-4b-sft-8epochs-distributed_<timestamp>.json" \
+  --local-dir ./eval_results
 ```
 
-- macOS: run data generation and evaluation in Docker. Mounting the FUSE filesystem directly on macOS is not supported in this repo.
+Modal keeps results under `/root/output_models`; the helper above copies them locally. The evaluator enforces a 1024-token generation cap and reports accuracy, exact match, and average similarity.
+
+## Running the FUSE filesystem
+
+The mountable filesystem is still work-in-progress in this trimmed build. The `llmfuse` package is preserved so the integration points remain stable, but the runtime entrypoint raises `NotImplementedError` until the Qwen-backed backend is wired in. Data generation, training, and evaluation remain fully supported.
 
 ## Local development (optional)
 
@@ -126,16 +90,18 @@ python -m pip install -r requirements.txt
 
 You can also use `uv` if you like, but Docker is recommended for anything requiring FUSE.
 
+> **Heads-up:** Both `llmfuse` and `llmencode` are currently placeholders kept for API compatibility. They raise `NotImplementedError` until the online inference path is reintroduced.
+
 ## Training on Modal
 
-Train models on Modal Labs with distributed GPU support:
+Train the Qwen3-4B pipeline directly on Modal (8× H100 GPUs recommended):
 
 ```bash
-# Train a model (8x H100 GPUs)
+# Fine-tune Qwen3-4B for 8 epochs on the 10k targeted corpus
 modal run train/sft_modal.py::train_qwen \
-  --model-path "Qwen/Qwen2.5-Coder-3B-Instruct" \
-  --training-data "data/train/fuse_2000_*.jsonl" \
-  --num-epochs 3 \
+  --model-name "qwen3-4b" \
+  --training-data "data/train/fuse_10000_1760983124.jsonl" \
+  --num-epochs 8 \
   --batch-size 4
 ```
 
@@ -158,40 +124,37 @@ Produces training triples: `(initial_state, operation) → result` where:
 - **State-changing ops** (`<W>`): Complete filesystem tree (State T → State T+1)
 - **Query ops** (`<R>`): Specific response (directory listing, file content, attributes)
 
-**Key improvements (Oct 2025):**
-1. **Deterministic content**: Files generate identical content based on filepath hash
-   - Enables model to learn exact content copying
-   - Same `/config.py` always has same content across all examples
-2. **Complete operation info**: Write operations include full `data` parameter
-3. **Valid references**: All operations only reference files that exist in initial state
-4. **Balanced distribution**: 12 operation types with ~8-15% each
+**Highlights (Oct 2025 refresh):**
+1. **Deterministic content**: File bodies are keyed off the path hash, so every `/config/foo.json` is a byte-for-byte copy across samples—critical for exact match.
+2. **Complete operation payloads**: Writes, truncates, and renames always include the full post-op state.
+3. **Targeted sampling**: `--targeted_prob 0.3` oversamples read/readdir scenarios, nested mkdir chains, and empty-tree edges that previously tripped the model.
+4. **Operation coverage (10 000-sample run):**
+   - `mkdir`: 1 758 • `write`: 1 652 • `readdir`: 1 137 • `read`: 880
+   - `create`: 836 • `unlink`: 751 • `rmdir`: 715 • `chown`: 585 • `chmod`: 573
 
-**Quality metrics (5K sample dataset):**
-- ✅ 100% write operations include data parameter
-- ✅ 94% rename operations reference valid source files
-- ✅ 5.9% empty filesystem operations (edge case coverage)
-- ✅ 3.2% deeply nested mkdir operations
-- ✅ 1.1% error responses (realistic failure scenarios)
+**Quality snapshots (10 k targeted set):**
+- ✅ 880 read completions match byte length expectations (85 are intentional zero-byte reads).
+- ✅ 1 137 readdir outputs parse as JSON arrays and mirror the on-tree entries exactly.
+- ✅ No tree-formatting regressions detected in the generated completions.
 
 **Command-line flags:**
-- `-n / --num_examples`: Number of examples (default: 100, recommended: 5000+)
-- `--output_dir`: Output directory (default: `/app/data/train`)
-- `--targeted_prob`: Edge case probability (default: 0.25, recommended: 0.05)
+- `--num_examples`: Number of examples to emit (use 10 000 for the current best run).
+- `--targeted_prob`: Edge-case sampling rate (0.3 matches the latest training/eval runs).
+- `--output_dir`: Output directory (default: `/app/data/train` inside Docker).
 
 **Output format:** JSONL files with `prompt` and `completion` fields, using `<W>`/`<R>` markers.
 
 ## Evaluation
 
-Robust evaluators with format-aware similarity:
+Modal hosts the evaluation pipeline. The primary entrypoints are:
 
-- Local CLI (see above): `eval/cli.py`
-- Modal functions: `eval/modal_eval.py::eval_on_dataset`, `eval/modal_eval.py::download_eval_results_file`
+- `eval/modal_eval.py::eval_on_dataset` – run inference with vLLM (1024-token cap, greedy decoding).
+- `eval/modal_eval.py::download_eval_results_file` – pull the JSON report back to disk.
 
 Highlights:
-- Handles mixed completion formats (filesystem trees, stat-like outputs, directory listings)
-- Uses same strict prompt contracts as training for consistency
-- Similarity-based scoring (threshold: 0.7) with exact match tracking
-- Results saved as JSON with detailed per-example analysis
+- Enforces the same contracts used for supervised fine-tuning, preventing format drift.
+- Reports accuracy (similarity > 0.7), exact match, average similarity, and per-sample breakdowns.
+- Works out-of-the-box with the curated 100-sample regression dataset or any JSONL produced by `train/generate_data.py`.
 
 ## Architecture
 
@@ -248,11 +211,11 @@ Core dependencies are listed in `requirements.txt` (notably `fusepy`, `torch`, `
 ## Current Results & Future Work
 
 ### Performance (October 2025)
-- **Model:** `qwen3-4b` (Qwen2.5-Coder-3B-Instruct fine-tuned)
-- **Training Data (old):** 2,000 examples with random content
-- **Accuracy:** 78% (similarity > 0.7)
-- **Exact Match:** 52%
-- **Average Similarity:** 0.866
+- **Model:** `qwen3-4b-sft-3epochs-distributed` (base: `Qwen/Qwen2.5-Coder-3B-Instruct`)
+- **Training Data:** 5,000 deterministic examples with logged write contents
+- **Accuracy:** 75% (similarity > 0.7)
+- **Exact Match:** 64.5%
+- **Average Similarity:** 0.854
 
 ### Recent Improvements (Oct 19, 2025)
 **Major data quality fixes:**
@@ -261,15 +224,15 @@ Core dependencies are listed in `requirements.txt` (notably `fusepy`, `torch`, `
 - ✅ All operations reference existing files only
 - ✅ Removed compound commands creating inline files
 
-**Expected impact:**
-- Accuracy: ~78-80% (structural understanding already good)
-- **Exact Match: 75-95%** (up from 52% - model can now copy content correctly)
-- Gap reduction: From 26pp to <10pp
+**Observed impact (Oct 19, 2025):**
+- Accuracy: 75% (similarity > 0.7)
+- **Exact Match:** 64.5% (up from 52% baseline)
+- Average similarity: 0.854
 
-**New training data ready:**
-- 5,000 high-quality examples with deterministic content
-- File: `data/train/fuse_5000_1760902673.jsonl`
-- Ready for retraining to validate improvements
+**Next training opportunities:**
+- Scale beyond 5,000 examples (e.g., 10K+) to push exact match higher
+- File: `data/train/fuse_5000_1760902673.jsonl` (latest dataset)
+- Ready for additional training runs or larger models
 
 ### Path to 95%+ Accuracy
 1. ✅ Fix data quality issues (deterministic content, complete operations)
@@ -286,4 +249,3 @@ See [`AGENTS.md`](./AGENTS.md) for detailed analysis and research directions.
 - **Modal training/eval**: Ensure you have Modal credentials configured (`modal token set --token-id YOUR_ID --token-secret YOUR_SECRET`).
 - **Modal eval results**: Download files via `eval/modal_eval.py::download_eval_results_file --filename <name>`.
 - **Decode CLI**: Use `test` for roundtrip; standalone `decode` needs metadata from the same session.
-

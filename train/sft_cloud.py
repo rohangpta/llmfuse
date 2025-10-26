@@ -8,6 +8,7 @@ import argparse
 import json
 import os
 import sys
+import re
 import torch
 import torch.distributed as dist
 from datasets import Dataset
@@ -76,27 +77,27 @@ def main():
     parser.add_argument("--learning_rate", type=float, default=2e-5)
     parser.add_argument("--use_wandb", action="store_true")
     parser.add_argument("--gradient_checkpointing", action="store_true")
+    parser.add_argument("--resume_from", type=str, default=None,
+                        help="Optional local path to a fine-tuned checkpoint to resume from (overrides base model)")
     args = parser.parse_args()
 
     # Setup distributed training
     setup_distributed()
 
-    # Model mapping
-    model_mapping = {
-        "qwen3-0.6b": "Qwen/Qwen2.5-0.5B",          # Base model (no instruct)
-        "qwen3-1.7b": "Qwen/Qwen2.5-1.5B",          # Base model  
-        "qwen3-3b": "Qwen/Qwen2.5-3B",              # Base model
-        "qwen3-4b": "Qwen/Qwen3-4B",                # Actual Qwen3-4B model
-        "qwen3-8b": "Qwen/Qwen2.5-7B",              # Base model
-        "qwen3-14b": "Qwen/Qwen2.5-14B",            # Base model
-        "qwen3-32b": "Qwen/Qwen2.5-32B",            # Base model
-    }
+    # Only Qwen3-4B is supported in the trimmed training pipeline.
+    model_mapping = {"qwen3-4b": "Qwen/Qwen3-4B"}
 
-    if args.model_name not in model_mapping:
-        raise ValueError(f"Model {args.model_name} not supported. Choose from: {list(model_mapping.keys())}")
-
-    model_id = model_mapping[args.model_name]
-    print(f"🤖 Using model: {model_id}")
+    resume_path = args.resume_from
+    if resume_path and os.path.exists(resume_path):
+        print(f"🔁 Resuming from checkpoint: {resume_path}")
+        model_id = resume_path
+        use_local_checkpoint = True
+    else:
+        if args.model_name not in model_mapping:
+            raise ValueError("Only `qwen3-4b` is supported in this configuration.")
+        model_id = model_mapping[args.model_name]
+        use_local_checkpoint = False
+        print(f"🤖 Using base model: {model_id}")
 
     # Load training data
     print("📁 Loading training data...")
@@ -106,8 +107,8 @@ def main():
     # Load model and tokenizer
     print("🔄 Loading model and tokenizer...")
     tokenizer = AutoTokenizer.from_pretrained(
-        model_id, 
-        trust_remote_code=True, 
+        model_id,
+        trust_remote_code=True,
         use_fast=False,
         padding_side="right",  # Required for causal LM
     )
@@ -169,9 +170,47 @@ def main():
     )
 
     # Transform dataset to have 'text' field that SFTTrainer expects
+    def _detect_operation_line(prompt: str) -> str:
+        if not prompt:
+            return ""
+        for line in prompt.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if stripped.startswith("<") and stripped.endswith(">") and len(stripped) <= 4:
+                continue
+            return stripped
+        return ""
+
+    def build_prompt_with_contract(original_prompt: str) -> str:
+        header = (
+            "You are a pure function. Output exactly the required result and nothing else.\n"
+            "No explanations, no code fences, no repeated outputs, no prefixes or suffixes.\n"
+        )
+        op_line = _detect_operation_line(original_prompt).lower()
+        if "readdir(" in op_line:
+            contract = (
+                "Return only a JSON array of names with double quotes, on one line,\n"
+                "formatted exactly like: [\".\", \"..\", \"name1\", \"name2\"].\n"
+                "Use a single space after each comma. Output nothing else.\n"
+                "Sort the names in lexicographic order (\".\", then \"..\", then others ascending)."
+            )
+        elif op_line.startswith("read(") or " read(" in op_line:
+            contract = (
+                "Return only the exact file content. If the file is empty, return an empty string\n"
+                "(no characters). Output nothing else."
+            )
+        else:
+            contract = (
+                "Return exactly one filesystem tree starting with '/'. Output nothing else,\n"
+                "and do not repeat the tree."
+            )
+        return f"{header}{contract}\n\n{original_prompt}"
+
     def add_text_field(example):
-        # Combine prompt and completion into single text field
-        example['text'] = f"{example['prompt']}\n{example['completion']}"
+        # Prepend strict contract to the prompt so the model learns the output format
+        wrapped_prompt = build_prompt_with_contract(example['prompt'])
+        example['text'] = f"{wrapped_prompt}\n{example['completion']}"
         return example
     
     print("🔄 Transforming dataset for SFTTrainer...")

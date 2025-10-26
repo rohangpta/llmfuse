@@ -8,16 +8,28 @@ the filesystem state as a text representation and querying the LLM for each oper
 
 import json
 import os
+import re
 import sys
-from errno import ENOENT, EEXIST, ENOTDIR, EISDIR, ENOTEMPTY
-from stat import S_IFDIR, S_IFREG, S_IFLNK
+from datetime import datetime
+from errno import EEXIST, ENOENT
+from stat import S_IFDIR, S_IFLNK, S_IFREG
 from time import time
-from typing import Dict, List, Any, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
-from fuse import FUSE, FuseOSError, Operations, LoggingMixIn
+from fuse import FUSE, FuseOSError, LoggingMixIn, Operations
 
-from .fs_state import FSState, FileEntry
-from common.model import get_model_response
+from llmfuse.fs_state import FSState, FileEntry
+from llmfuse.utils import extract_result_from_llm_output
+
+
+def get_model_response(*args, **kwargs) -> str:
+    """
+    Placeholder hook for future LLM integration.
+
+    The production system will wire this up to a real model endpoint. For now,
+    we raise to make it explicit that filesystem queries are not implemented.
+    """
+    raise NotImplementedError("LLM-backed filesystem operations are not yet implemented.")
 
 # Check if FUSE is available
 try:
@@ -34,27 +46,27 @@ class LLMFuse(LoggingMixIn, Operations):
     the LLM is queried for each operation to determine the new state.
     """
 
-    def __init__(self, initial_state: Optional[str] = None):
+    def __init__(self, initial_state: Optional[str] = None, root_owner: str = "root", root_group: str = "root", root_mode: int = 0o755):
         self.fs_state = FSState(".")
         self.fd = 0
-        
-        # Initialize with empty filesystem if no initial state provided
+
+        # Initialize with provided state or empty filesystem
         if initial_state:
             self._parse_state_from_string(initial_state)
         else:
-            # Start with just root directory
+            now = time()
             self.fs_state.state = {
-                '': FileEntry(
-                    name='/',
+                "": FileEntry(
+                    name="/",
                     is_dir=True,
-                    mode=0o755,
-                    owner="user",
-                    group="user",
-                    mtime=time(),
-                    size=0
+                    mode=root_mode,
+                    owner=root_owner,
+                    group=root_group,
+                    mtime=now,
+                    size=0,
                 )
             }
-        
+
         # Special handling for /dev/llm
         self.llm_device_content = ""
 
@@ -63,77 +75,52 @@ class LLMFuse(LoggingMixIn, Operations):
         return self.fs_state.to_tree_string()
 
     def _parse_state_from_string(self, state_str: str) -> None:
-        """Parse filesystem state from tree format string."""
+        """Parse filesystem state from tree format string into FSState."""
         self.fs_state.state = {}
-        
-        if not state_str or not state_str.strip():
+
+        if not state_str:
             return
-        
-        lines = state_str.strip().split('\n')
-        
-        for line in lines:
-            if not line.strip():
+
+        lines = [line.rstrip("\n") for line in state_str.splitlines() if line.strip()]
+        if not lines:
+            return
+
+        root_line = lines[0]
+        self._process_entry_line(root_line, "")
+
+        stack: List[Tuple[int, str]] = []
+
+        for line in lines[1:]:
+            stripped = line.rstrip()
+            if not stripped:
                 continue
-            
-            # Skip the root directory line (starts with /)
-            if line.strip().startswith('/') and 'dir' in line:
-                continue
-                
-            # Extract filename from tree prefixes more robustly
-            cleaned = line
-            tree_prefixes = ['├── ', '└── ', '│   ', '├──', '└──', '│']
-            for prefix in tree_prefixes:
-                cleaned = cleaned.replace(prefix, '')
-            
-            # Split the line to extract filename and metadata
-            parts = cleaned.strip().split()
-            if not parts:
-                continue
-                
-            filename = parts[0]
-            if not filename or filename in ['.', '..'] or filename.startswith('/'):
-                continue
-            
-            # Determine if it's a directory or file
-            is_dir = len(parts) > 1 and parts[1] == 'dir'
-            
-            # Extract mode if available
-            mode = 0o755 if is_dir else 0o644
-            if len(parts) > 2:
-                try:
-                    # Handle both octal strings and plain numbers
-                    mode_str = parts[2]
-                    if mode_str.startswith('0o'):
-                        mode = int(mode_str, 8)
-                    else:
-                        mode = int(mode_str, 8)
-                except (ValueError, IndexError):
-                    pass
-            
-            # Extract size if available
-            size = 0
-            for i, part in enumerate(parts):
-                if part.endswith('B') and i > 0:
-                    try:
-                        size_str = part[:-1]  # Remove 'B'
-                        size = int(size_str) if size_str.isdigit() else 0
-                    except (ValueError, IndexError):
-                        pass
+
+            depth = 0
+            idx = 0
+            while idx < len(stripped):
+                if stripped.startswith("│   ", idx) or stripped.startswith("    ", idx):
+                    depth += 1
+                    idx += 4
+                else:
                     break
-            
-            # Create FileEntry
-            entry = FileEntry(
-                name=filename,
-                is_dir=is_dir,
-                mode=mode,
-                owner="root",  # Use root instead of user for consistency
-                group="root", 
-                mtime=time(),
-                size=size
-            )
-            
-            # Store with filename as key (simplified - assumes flat structure)
-            self.fs_state.state[filename] = entry
+
+            if stripped[idx:].startswith("├── "):
+                idx += 4
+            elif stripped[idx:].startswith("└── "):
+                idx += 4
+
+            entry_line = stripped[idx:]
+            parent_path = ""
+            while stack and stack[-1][0] >= depth:
+                stack.pop()
+            if stack:
+                parent_path = stack[-1][1]
+
+            rel_path = self._process_entry_line(entry_line, parent_path)
+            if rel_path is not None:
+                entry = self.fs_state.state.get(rel_path)
+                if entry and entry.is_dir:
+                    stack.append((depth, rel_path))
 
     def _query_llm_for_operation(self, operation: str, path: str, **kwargs) -> str:
         """Query the LLM for a filesystem operation."""

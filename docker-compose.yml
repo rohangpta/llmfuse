@@ -9,6 +9,7 @@ services:
     privileged: true  # Required for FUSE
     volumes:
       - ./data:/app/data
+      - ./models:/app/models:ro
       - ./common:/app/common:ro
       - ./train:/app/train:ro
       - ./eval:/app/eval:ro
@@ -25,13 +26,19 @@ services:
       - PYTHONUNBUFFERED=1
       - GEMINI_API_KEY=${GEMINI_API_KEY}
     command: ["python", "-m", "train.generate_data", "--num_examples", "100", "--output_dir", "/app/data/train"]
-    
-  # End-to-end evaluation service
-  eval:
+
+  # Integration test: mount LLM-backed FUSE and run end-to-end ops
+  fuse_integration:
     build:
       context: .
       dockerfile: Dockerfile.datagen
     privileged: true  # Required for FUSE
+    devices:
+      - /dev/fuse:/dev/fuse
+    cap_add:
+      - SYS_ADMIN
+    security_opt:
+      - apparmor:unconfined
     volumes:
       - ./data:/app/data
       - ./common:/app/common:ro
@@ -39,16 +46,41 @@ services:
       - ./eval:/app/eval:ro
       - ./llmfuse:/app/llmfuse:ro
       - ./llmencode:/app/llmencode:ro
-    devices:
-      - /dev/fuse:/dev/fuse
-    cap_add:
-      - SYS_ADMIN
-    security_opt:
-      - apparmor:unconfined
     environment:
       - PYTHONPATH=/app
       - PYTHONUNBUFFERED=1
       - GEMINI_API_KEY=${GEMINI_API_KEY}
-    command: ["python", "eval/eval_main.py"]
+      # Optional: choose model backend for llmfuse
+      - LLMFUSE_MODEL=${LLMFUSE_MODEL:-qwen3-0.6b}
+      # Mountpoint inside the container
+      - FUSE_MOUNT=/tmp/fuse_mount
+      # Test script to run against the mounted fs
+      - INTEG_SCRIPT=/app/eval/llmfuse_integration_test.py
+    command: ["bash", "-lc", "set -euo pipefail; mkdir -p \"$FUSE_MOUNT\"; python llmfuse/llmfuse.py \"$FUSE_MOUNT\" & pid=$$!; sleep 2; python \"$INTEG_SCRIPT\" \"$FUSE_MOUNT\"; rc=$$?; fusermount -u \"$FUSE_MOUNT\" || umount \"$FUSE_MOUNT\" || true; kill $$pid || true; exit $$rc"]
+    
+  # Local evaluation service (no FUSE privileges required)
+  eval:
+    build:
+      context: .
+      dockerfile: Dockerfile.datagen
+    # No FUSE privileges needed for evaluation
+    volumes:
+      - ./data:/app/data
+      - ./models:/app/models:ro
+      - ./common:/app/common:ro
+      - ./train:/app/train:ro
+      - ./eval:/app/eval:ro
+      - ./llmfuse:/app/llmfuse:ro
+      - ./llmencode:/app/llmencode:ro
+    environment:
+      - PYTHONPATH=/app
+      - PYTHONUNBUFFERED=1
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      # Override these when running, as needed
+      - MODEL_PATH=/app/models/qwen3-0.6b-test
+      - DATASET_PATH=/app/data/train/fuse_200_1730000000.jsonl
+      - LIMIT=50
+      - SAVE_TO=/app/data/eval/local_eval.json
+    command: ["bash", "-lc", "mkdir -p $$(dirname \"$$SAVE_TO\") 2>/dev/null || true && python -m eval.cli --model-path \"$$MODEL_PATH\" --dataset-path \"$$DATASET_PATH\" $${LIMIT:+--limit \"$$LIMIT\"} $${SAVE_TO:+--save-to \"$$SAVE_TO\"}"]
 
 

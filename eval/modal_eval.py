@@ -3,7 +3,11 @@ import json
 from datetime import datetime
 import modal
 
-from .runner import evaluate_model_local
+# Support both package and script execution
+try:
+    from .runner import evaluate_model_local
+except Exception:
+    from eval.runner import evaluate_model_local
 
 # Modal app and volumes
 app = modal.App("llmfuse-eval")
@@ -22,7 +26,11 @@ image = (
         "accelerate>=0.24.0",
         "tokenizers>=0.15.0",
         "safetensors>=0.4.3",
+        "vllm>=0.6.2",
     ])
+    .workdir("/root")
+    .add_local_dir("eval", "/root/eval")
+    .add_local_dir("data", "/root/data")
 )
 
 
@@ -104,4 +112,4 @@ def download_eval_results_file(filename: str, local_dir: str = "./eval_results")
     with open(local_path, "wb") as f:
         f.write(data)
     print(f"✅ Saved to {local_path}")
-    return local_path 
+    return local_path

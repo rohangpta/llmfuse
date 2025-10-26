@@ -3,6 +3,9 @@ torch>=2.0.0
 transformers>=4.30.0
 numpy>=1.21.0
 
+# Optional: For external dataset support (not currently used)
+# datasets>=2.14.0
+
 # For Gemini API support (optional)
 google-generativeai>=0.3.0
 
