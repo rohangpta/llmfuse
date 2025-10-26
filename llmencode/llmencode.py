@@ -83,9 +83,10 @@ class LLMEncode:
     
     def _get_full_model_name(self) -> str:
         """Get the full HuggingFace model name."""
-        from common.model import QWEN3_MODELS
-        if self.model_name.lower() in QWEN3_MODELS:
-            return QWEN3_MODELS[self.model_name.lower()]
+        from common.model import get_qwen3_4b_id
+        canonical_id = get_qwen3_4b_id()
+        if self.model_name.lower() in ("qwen3-4b", canonical_id.lower()):
+            return canonical_id
         return self.model_name
     
     def encode(self, text: str) -> bytes:
