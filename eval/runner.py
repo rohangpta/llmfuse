@@ -1,11 +1,22 @@
 import json
+import os
 from datetime import datetime
 from typing import Dict, Any, List, Optional
 
 import torch
 
-from .postprocess import sanitize_by_expected
+from llmfuse.utils import STATE_STOP_TOKEN
+
+from .postprocess import (
+    sanitize_by_expected,
+    is_state_expected,
+    strip_state_stop_token,
+)
 from .metrics import exact_match, simple_similarity
+
+
+MAX_CONTEXT_TOKENS = int(os.environ.get("LLMFUSE_MAX_CONTEXT", 8192))
+MAX_GENERATED_TOKENS = int(os.environ.get("LLMFUSE_MAX_GENERATED", 4096))
 
 
 def _detect_operation_line(prompt: str) -> str:
@@ -52,8 +63,10 @@ def build_prompt_with_contract(original_prompt: str) -> str:
         )
     else:
         contract = (
-            "Return exactly one filesystem tree starting with '/'. Output nothing else,\n"
-            "and do not repeat the tree."
+            "Return exactly one <filesystem> XML document that represents the full state.\n"
+            "It must start with <filesystem> and end with </filesystem> with no commentary,\n"
+            f"and after emitting </filesystem> you must append the literal token {STATE_STOP_TOKEN} on its own line.\n"
+            "Output nothing after that sentinel and do not repeat or summarize the tree."
         )
 
     return f"{header}{contract}\n\n{original_prompt}"
@@ -92,19 +105,19 @@ def evaluate_model_local(model_dir: str, dataset_path: str, limit: Optional[int]
             model=model_dir,
             tensor_parallel_size=1,
             dtype="auto",
-            max_model_len=2048,
+            max_model_len=MAX_CONTEXT_TOKENS,
             enforce_eager=False,
         )
 
         base_sampling_params = SamplingParams(
             temperature=0.0,
             top_p=1.0,
-            max_tokens=1024,
+            max_tokens=MAX_GENERATED_TOKENS,
             n=1,
+            stop=[STATE_STOP_TOKEN],
         )
 
         try:
-            import os
             batch_size = int(os.environ.get("VLLM_EVAL_BATCH_SIZE", 64))
         except Exception:
             batch_size = 64
@@ -125,9 +138,10 @@ def evaluate_model_local(model_dir: str, dataset_path: str, limit: Optional[int]
                 expected = batch_expecteds[i]
                 predicted = output.outputs[0].text if output.outputs else ""
                 predicted = sanitize_by_expected(predicted, expected)
+                expected_for_metrics = strip_state_stop_token(expected) if is_state_expected(expected) else expected
 
-                sim = simple_similarity(predicted, expected)
-                em = exact_match(predicted, expected)
+                sim = simple_similarity(predicted, expected_for_metrics)
+                em = exact_match(predicted, expected_for_metrics)
                 if sim > 0.7:
                     num_correct += 1
                 if em:
@@ -156,11 +170,16 @@ def evaluate_model_local(model_dir: str, dataset_path: str, limit: Optional[int]
 
         for idx, (prompt, expected) in enumerate(zip(prompts, expecteds)):
             wrapped = build_prompt_with_contract(prompt)
-            inputs = tokenizer(wrapped, return_tensors="pt", truncation=True, max_length=2048).to(model.device)
+            inputs = tokenizer(
+                wrapped,
+                return_tensors="pt",
+                truncation=True,
+                max_length=MAX_CONTEXT_TOKENS,
+            ).to(model.device)
             with torch.no_grad():
                 outputs = model.generate(
                     **inputs,
-                    max_new_tokens=1024,
+                    max_new_tokens=MAX_GENERATED_TOKENS,
                     do_sample=False,
                     temperature=0.0,
                     pad_token_id=tokenizer.eos_token_id,
@@ -170,9 +189,10 @@ def evaluate_model_local(model_dir: str, dataset_path: str, limit: Optional[int]
             # Remove the wrapped prompt portion; best-effort by slicing by input length
             predicted = decoded[len(wrapped):].strip()
             predicted = sanitize_by_expected(predicted, expected)
+            expected_for_metrics = strip_state_stop_token(expected) if is_state_expected(expected) else expected
 
-            sim = simple_similarity(predicted, expected)
-            em = exact_match(predicted, expected)
+            sim = simple_similarity(predicted, expected_for_metrics)
+            em = exact_match(predicted, expected_for_metrics)
             if sim > 0.7:
                 num_correct += 1
             if em:

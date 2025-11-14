@@ -52,6 +52,7 @@ docker run --rm \
 - **Complete operations**: Write operations include full data, all operations reference existing files
 - **Diverse coverage**: 12 operation types with balanced distribution
 - **Edge case targeting**: Optional targeted examples for empty filesystems, nested directories
+- **XML state contract**: Both training data and eval prompts/completions emit the same `<filesystem>...</filesystem>` representation, followed by a literal `<END_FS>` sentinel so decoders know exactly when to stop copying the tree.
 
 Output files are JSONL with deterministic naming: `fuse_{num_samples}_{unixtime}.jsonl` in `data/train/`.
 
@@ -78,7 +79,43 @@ Modal keeps results under `/root/output_models`; the helper above copies them lo
 
 ## Running the FUSE filesystem
 
-The mountable filesystem is still work-in-progress in this trimmed build. The `llmfuse` package is preserved so the integration points remain stable, but the runtime entrypoint raises `NotImplementedError` until the Qwen-backed backend is wired in. Data generation, training, and evaluation remain fully supported.
+The LLM-driven filesystem now talks to the fine-tuned Qwen checkpoint over Modal. Each kernel operation is converted into the same `<W>/<R>` contract used for training/eval, sent to Modal, and the resulting tree or query response is streamed back to FUSE.
+
+### 1. Deploy the Modal inference service
+
+Create a shared secret (once):
+
+```bash
+modal secret create llmfuse-runtime-token <YOUR_RANDOM_TOKEN>
+```
+
+Then deploy the GPU-backed service (loads `/root/output_models/qwen3-4b-sft-8epochs-distributed` by default):
+
+```bash
+# Keeps an H100 warm and exposes https://.../generate
+modal run infra/modal_llmfuse.py::deploy \
+  --model-path qwen3-4b-sft-8epochs-distributed
+```
+
+Print the web URL any time via:
+
+```bash
+modal run infra/modal_llmfuse.py::show_endpoint
+```
+
+The filesystem container expects `LLMFUSE_REMOTE_ENDPOINT` to point at that URL plus `/generate`, and `LLMFUSE_REMOTE_TOKEN` to match the secret payload.
+
+### 2. Mount the filesystem inside Docker
+
+macOS cannot expose FUSE devices directly, so run the daemon inside Linux Docker and bind-mount the target directory back to the host. A helper script handles the boilerplate:
+
+```bash
+export LLMFUSE_REMOTE_ENDPOINT="https://<modal-id>.modal.run/generate"
+export LLMFUSE_REMOTE_TOKEN="<YOUR_RANDOM_TOKEN>"
+bash scripts/run_llmfuse.sh
+```
+
+The script builds `Dockerfile.llmfuse`, requests `/dev/fuse` with the necessary privileges, and mounts the virtual filesystem at `./mount` on the host. Use any standard shell commands inside `./mount` (mkdir, cat, etc.)—each operation is proxied through the Modal endpoint and the in-memory state stays aligned with the LLM outputs.
 
 ## Local development (optional)
 
@@ -90,7 +127,7 @@ python -m pip install -r requirements.txt
 
 You can also use `uv` if you like, but Docker is recommended for anything requiring FUSE.
 
-> **Heads-up:** Both `llmfuse` and `llmencode` are currently placeholders kept for API compatibility. They raise `NotImplementedError` until the online inference path is reintroduced.
+> **Heads-up:** `llmfuse` expects either a running Modal endpoint (`LLMFUSE_REMOTE_ENDPOINT`) or local Qwen weights (see `common/model.py`). `llmencode` remains a placeholder until the online inference path is reintroduced.
 
 ## Training on Modal
 
@@ -166,6 +203,8 @@ Highlights:
   - Distributed fine-tuning on Modal Labs using strict prompt contracts.
 - **LLM-backed FUSE**: `llmfuse/llmfuse.py`
   - Maintains state as a text tree via `llmfuse/fs_state.py` and prompts an LLM to compute the next full state for each operation.
+- **Modal runtime**: `infra/modal_llmfuse.py`
+  - FastAPI + vLLM service that keeps Qwen loaded on an H100 and exposes `/generate` for the filesystem daemon.
 - **Evaluation**: `eval/runner.py` (local) and `eval/modal_eval.py` (Modal)
   - Applies same prompt contracts as training for accurate evaluation.
 - **Utilities**: `llmfuse/utils.py` (tree formatting constants, helpers)
@@ -202,6 +241,8 @@ stats = encoder.test_roundtrip("Hello world", verbose=True)
 - `eval/`: Evaluation pipelines (local and Modal support)
 - `llmencode/`: Arithmetic coding + LLM-guided compression
 - `common/`: Shared model utilities
+- `infra/`: Modal deployment helpers (runtime inference service)
+- `scripts/`: Utility shell scripts (`run_llmfuse.sh` for containerized mounting)
 - `data/`: Generated datasets and evaluation outputs
 
 ## Requirements

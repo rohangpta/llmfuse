@@ -8,28 +8,85 @@ the filesystem state as a text representation and querying the LLM for each oper
 
 import json
 import os
-import re
 import sys
 from datetime import datetime
-from errno import EEXIST, ENOENT
+from errno import EEXIST, ENOENT, EIO
 from stat import S_IFDIR, S_IFLNK, S_IFREG
 from time import time
 from typing import Any, Dict, List, Optional, Tuple
 
+import requests
 from fuse import FUSE, FuseOSError, LoggingMixIn, Operations
 
+from eval.runner import build_prompt_with_contract
 from llmfuse.fs_state import FSState, FileEntry
 from llmfuse.utils import extract_result_from_llm_output
 
 
-def get_model_response(*args, **kwargs) -> str:
-    """
-    Placeholder hook for future LLM integration.
+REMOTE_ENDPOINT_ENV = "LLMFUSE_REMOTE_ENDPOINT"
+REMOTE_TOKEN_ENV = "LLMFUSE_REMOTE_TOKEN"
+REMOTE_TIMEOUT_ENV = "LLMFUSE_REMOTE_TIMEOUT"
+REMOTE_RETRY_ENV = "LLMFUSE_REMOTE_RETRIES"
+DEFAULT_REMOTE_TIMEOUT = 30
+DEFAULT_REMOTE_RETRIES = 1
 
-    The production system will wire this up to a real model endpoint. For now,
-    we raise to make it explicit that filesystem queries are not implemented.
+def _load_local_model_fn():
+    try:
+        from common.model import get_model_response as local_get_model_response  # type: ignore
+        return local_get_model_response
+    except Exception:
+        return None
+
+
+_LOCAL_MODEL_FN = _load_local_model_fn()
+
+
+def _call_remote_model(prompt: str, temperature: float = 0.0) -> str:
+    raw_endpoint = os.environ.get(REMOTE_ENDPOINT_ENV)
+    if not raw_endpoint:
+        raise RuntimeError("LLMFUSE remote endpoint is not configured.")
+
+    endpoint = raw_endpoint.rstrip("/")
+    if not endpoint.endswith("/generate"):
+        endpoint = f"{endpoint}/generate"
+
+    timeout = float(os.environ.get(REMOTE_TIMEOUT_ENV, DEFAULT_REMOTE_TIMEOUT))
+    max_retries = int(os.environ.get(REMOTE_RETRY_ENV, DEFAULT_REMOTE_RETRIES))
+    token = os.environ.get(REMOTE_TOKEN_ENV)
+
+    last_error: Optional[Exception] = None
+    for attempt in range(max_retries + 1):
+        try:
+            headers = {"Content-Type": "application/json"}
+            if token:
+                headers["X-LLMFuse-Token"] = token
+
+            payload = {"prompt": prompt, "temperature": temperature}
+            response = requests.post(
+                endpoint,
+                json=payload,
+                headers=headers,
+                timeout=timeout,
+            )
+            response.raise_for_status()
+            data = response.json()
+            return data.get("text", "").strip()
+        except Exception as exc:
+            last_error = exc
+    raise RuntimeError(f"Remote LLM request failed: {last_error}")
+
+
+def get_model_response(prompt: str, temperature: float = 0.0) -> str:
     """
-    raise NotImplementedError("LLM-backed filesystem operations are not yet implemented.")
+    Resolve a response using either the remote Modal endpoint or a local model.
+    """
+    if os.environ.get(REMOTE_ENDPOINT_ENV):
+        return _call_remote_model(prompt, temperature=temperature)
+    if _LOCAL_MODEL_FN is not None:
+        return _LOCAL_MODEL_FN(prompt, temperature=temperature)
+    raise RuntimeError(
+        "No model backend configured. Set LLMFUSE_REMOTE_ENDPOINT or install local weights."
+    )
 
 # Check if FUSE is available
 try:
@@ -47,12 +104,12 @@ class LLMFuse(LoggingMixIn, Operations):
     """
 
     def __init__(self, initial_state: Optional[str] = None, root_owner: str = "root", root_group: str = "root", root_mode: int = 0o755):
-        self.fs_state = FSState(".")
+        self.fs_state = FSState(root_path=None)
         self.fd = 0
 
         # Initialize with provided state or empty filesystem
         if initial_state:
-            self._parse_state_from_string(initial_state)
+            self._load_state_from_xml(initial_state)
         else:
             now = time()
             self.fs_state.state = {
@@ -72,102 +129,11 @@ class LLMFuse(LoggingMixIn, Operations):
 
     def _get_state_string(self) -> str:
         """Get current filesystem state as a tree string."""
-        return self.fs_state.to_tree_string()
+        return self.fs_state.to_xml_string(include_contents=True, max_file_size=10_000)
 
-    def _parse_state_from_string(self, state_str: str) -> None:
-        """Parse filesystem state from tree format string into FSState."""
-        self.fs_state.state = {}
-
-        if not state_str:
-            return
-
-        lines = [line.rstrip("\n") for line in state_str.splitlines() if line.strip()]
-        if not lines:
-            return
-
-        root_line = lines[0]
-        self._process_entry_line(root_line, "")
-
-        stack: List[Tuple[int, str]] = []
-
-        for line in lines[1:]:
-            stripped = line.rstrip()
-            if not stripped:
-                continue
-
-            depth = 0
-            idx = 0
-            while idx < len(stripped):
-                if stripped.startswith("│   ", idx) or stripped.startswith("    ", idx):
-                    depth += 1
-                    idx += 4
-                else:
-                    break
-
-            if stripped[idx:].startswith("├── "):
-                idx += 4
-            elif stripped[idx:].startswith("└── "):
-                idx += 4
-
-            entry_line = stripped[idx:]
-            parent_path = ""
-            while stack and stack[-1][0] >= depth:
-                stack.pop()
-            if stack:
-                parent_path = stack[-1][1]
-
-            rel_path = self._process_entry_line(entry_line, parent_path)
-            if rel_path is not None:
-                entry = self.fs_state.state.get(rel_path)
-                if entry and entry.is_dir:
-                    stack.append((depth, rel_path))
-
-    def _query_llm_for_operation(self, operation: str, path: str, **kwargs) -> str:
-        """Query the LLM for a filesystem operation."""
-        print(f"DEBUG: _query_llm_for_operation called: {operation}({path})")
-        current_state = self._get_state_string()
-        
-        # Format the operation with parameters
-        params_str = ""
-        if kwargs:
-            params_list = []
-            for key, value in kwargs.items():
-                if isinstance(value, str):
-                    params_list.append(f"{key}='{value}'")
-                else:
-                    params_list.append(f"{key}={value}")
-            params_str = ", " + ", ".join(params_list)
-
-        prompt = f"""You are implementing a virtual filesystem backend service. You store filesystem state in context and serve filesystem operations on this virtual data. Given the current virtual filesystem state and an operation, return EXACTLY the new virtual filesystem state.
-
-Current virtual filesystem state:
-{current_state}
-
-Operation: {operation}('{path}'{params_str})
-
-CRITICAL REQUIREMENTS:
-- Return the COMPLETE virtual filesystem tree in EXACT same format as input
-- Use root:root for ownership (not user:user)
-- Preserve exact timestamp format: "Jun 14 17:57"
-- Include file sizes (e.g., "36 B", "0 B")
-- Use exact tree symbols: ├── └── │
-- If operation fails (file doesn't exist, etc.), return UNCHANGED state
-- NO extra text, NO reasoning, NO <think> tags - ONLY the virtual filesystem tree
-- Start your response immediately with "/" (the root directory)
-
-New virtual filesystem state:"""
-
-        try:
-            print(f"DEBUG: About to call get_model_response...")
-            import time
-            start = time.time()
-            response = get_model_response(prompt, temperature=0.0)
-            elapsed = (time.time() - start) * 1000
-            print(f"DEBUG: LLM call completed in {elapsed:.1f}ms")
-            return response.strip()
-        except Exception as e:
-            print(f"DEBUG: LLM call failed with exception: {e}")
-            return f"ERROR: LLM query failed: {str(e)}"
+    def _load_state_from_xml(self, xml_state: str) -> None:
+        """Parse filesystem state from canonical XML into FSState."""
+        self.fs_state.from_xml_string(xml_state)
 
     def _handle_llm_response(self, response: str) -> bool:
         """Handle LLM response and update filesystem state."""
@@ -175,14 +141,59 @@ New virtual filesystem state:"""
         if response.startswith("ERROR:"):
             print(f"LLM operation failed: {response}")
             return False
-        
+
         try:
-            self._parse_state_from_string(response)
+            cleaned = extract_result_from_llm_output(response).strip()
+            if "<filesystem" not in cleaned:
+                raise ValueError("LLM response did not contain <filesystem>")
+            self._load_state_from_xml(cleaned)
             print("DEBUG: Successfully parsed LLM response")
             return True
         except Exception as e:
             print(f"Failed to parse LLM response: {e}")
             return False
+
+    def _format_operation_call(self, operation: str, args: Tuple[Any, ...], kwargs: Dict[str, Any]) -> str:
+        def format_value(key: Optional[str], value: Any) -> str:
+            raw_keys = {"mode", "uid", "gid", "size", "offset", "length", "data_length", "fh", "flags", "datasync"}
+            if value is None:
+                return "None"
+            if isinstance(value, str):
+                if key == "data":
+                    return value
+                if key in raw_keys:
+                    return value
+                return repr(value)
+            return str(value)
+
+        rendered_args = [format_value(None, arg) for arg in args]
+        rendered_kwargs = [f"{key}={format_value(key, value)}" for key, value in kwargs.items()]
+        params = ", ".join([p for p in (*rendered_args, *rendered_kwargs) if p])
+        return f"{operation}({params})"
+
+    def _build_llm_prompt(self, op_tag: str, operation_line: str) -> str:
+        current_state = self._get_state_string()
+        base_prompt = f"{op_tag}\n{operation_line}\n---\n{current_state}"
+        return build_prompt_with_contract(base_prompt)
+
+    def _query_llm_for_operation(
+        self,
+        operation: str,
+        *op_args: Any,
+        response_mode: str = "tree",
+        temperature: float = 0.0,
+        **kwargs: Any,
+    ) -> str:
+        """Query the LLM for a filesystem operation."""
+        op_line = self._format_operation_call(operation, op_args, kwargs)
+        op_tag = "<R>" if response_mode != "tree" else "<W>"
+        prompt = self._build_llm_prompt(op_tag, op_line)
+
+        try:
+            response = get_model_response(prompt, temperature=temperature)
+            return response.strip()
+        except Exception as e:
+            return f"ERROR: LLM query failed: {str(e)}"
 
     def getattr(self, path, fh=None):
         """Get file attributes."""
@@ -230,12 +241,7 @@ New virtual filesystem state:"""
                 st_gid=os.getgid()
             )
         
-        # Query LLM for other paths
-        response = self._query_llm_for_operation('getattr', path)
-        
-        # For getattr, we need to extract attributes from the response
-        # This is simplified - in practice, you'd want the LLM to return structured data
-        rel_path = path.lstrip('/')
+        rel_path = path.lstrip('/').rstrip('/')
         if rel_path in self.fs_state.state:
             entry = self.fs_state.state[rel_path]
             return dict(
@@ -254,40 +260,60 @@ New virtual filesystem state:"""
     def readdir(self, path, fh):
         """Read directory contents."""
         print(f"DEBUG: readdir called for path: {path}")
-        
-        # Handle special directories
+
+        if path == '/dev':
+            return ['.', '..', 'llm']
+
+        try:
+            response = self._query_llm_for_operation('readdir', path, fh=fh, response_mode="json")
+            cleaned = extract_result_from_llm_output(response)
+            entries = json.loads(cleaned)
+            if not isinstance(entries, list):
+                raise ValueError("readdir response was not a list")
+        except Exception as exc:
+            print(f"DEBUG: readdir fallback due to {exc}")
+            entries = self._fallback_readdir_entries(path)
+
+        normalized = []
+        seen = set()
+        for entry in entries:
+            name = str(entry)
+            if name not in seen:
+                normalized.append(name)
+                seen.add(name)
+
+        if '.' not in seen:
+            normalized.insert(0, '.')
+            seen.add('.')
+        if '..' not in seen:
+            normalized.insert(1 if normalized else 0, '..')
+            seen.add('..')
+
+        if path == '/' and 'dev' not in seen:
+            normalized.append('dev')
+
+        return normalized
+
+    def _fallback_readdir_entries(self, path: str) -> List[str]:
+        entries = ['.', '..']
         if path == '/':
-            entries = ['.', '..']
-            # Add top-level entries from filesystem state
             for file_path, entry in self.fs_state.state.items():
-                if '/' not in file_path and file_path != '':
+                if file_path and '/' not in file_path:
                     entries.append(entry.name)
-            # Always include /dev
             if 'dev' not in entries:
                 entries.append('dev')
             return entries
-        
-        if path == '/dev':
-            return ['.', '..', 'llm']
-        
-        # Query LLM for directory listing
-        response = self._query_llm_for_operation('readdir', path)
-        
-        # Parse directory entries from response
-        # This is simplified - the LLM should return a structured list
-        entries = ['.', '..']
-        
-        # Extract entries from current state
+
         prefix = path.lstrip('/').rstrip('/')
         if prefix:
             prefix += '/'
-        
+
         for file_path, entry in self.fs_state.state.items():
-            if file_path.startswith(prefix):
-                relative = file_path[len(prefix):]
-                if '/' not in relative:  # Direct child only
-                    entries.append(entry.name)
-        
+            if not file_path.startswith(prefix):
+                continue
+            relative = file_path[len(prefix):]
+            if '/' not in relative and relative:
+                entries.append(entry.name)
         return entries
 
     def mkdir(self, path, mode):
@@ -346,9 +372,15 @@ New virtual filesystem state:"""
             # Return the current LLM device content
             content = self.llm_device_content.encode('utf-8')
             return content[offset:offset + size]
-        
-        # For other files, this is simplified - in practice, you'd maintain file contents
-        return b''
+
+        response = self._query_llm_for_operation('read', path, size=size, offset=offset, fh=fh, response_mode="text")
+        if response.startswith("ERROR:"):
+            raise FuseOSError(EIO)
+        cleaned = extract_result_from_llm_output(response)
+        data = cleaned.encode('utf-8')
+        start = min(offset, len(data))
+        end = min(start + size, len(data))
+        return data[start:end]
 
     def write(self, path, data, offset, fh):
         """Write to a file."""
@@ -375,14 +407,25 @@ Provide a helpful answer based on the current filesystem state:"""
                 self.llm_device_content = f"Error: {str(e)}"
             
             return len(data)
-        
-        # For other files, this would update file contents
-        # This is simplified for now
+
+        data_str = data.decode('utf-8', errors='replace')
+        response = self._query_llm_for_operation(
+            'write',
+            path,
+            data=data_str,
+            data_length=len(data),
+            offset=offset,
+            fh=fh,
+        )
+        if not self._handle_llm_response(response):
+            raise FuseOSError(EIO)
         return len(data)
 
     def truncate(self, path, length, fh=None):
         """Truncate a file."""
-        # Simplified implementation
+        response = self._query_llm_for_operation('truncate', path, length=length, fh=fh)
+        if not self._handle_llm_response(response):
+            raise FuseOSError(EIO)
         return 0
 
     def rename(self, old, new):
@@ -400,8 +443,10 @@ Provide a helpful answer based on the current filesystem state:"""
 
     def readlink(self, path):
         """Read the target of a symbolic link."""
-        # Simplified implementation
-        return ""
+        response = self._query_llm_for_operation('readlink', path, response_mode="text")
+        if response.startswith("ERROR:"):
+            raise FuseOSError(ENOENT)
+        return extract_result_from_llm_output(response)
 
     def statfs(self, path):
         """Get filesystem statistics."""

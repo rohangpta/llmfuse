@@ -30,7 +30,7 @@ from typing import Dict, List, Tuple, Any, Optional
 
 # Local imports
 from llmfuse.fs_state import FSState, FileEntry
-from llmfuse.utils import DEFAULT_FILE_MODE, DEFAULT_DIR_MODE
+from llmfuse.utils import DEFAULT_FILE_MODE, DEFAULT_DIR_MODE, STATE_STOP_TOKEN
 
 # Generation constants
 MIN_SETUP_OPERATIONS = 2
@@ -40,10 +40,14 @@ MAX_FILE_SIZE = 500
 MIN_NESTED_DEPTH = 2  # Actual nesting starts at 2 (e.g., /a/b)
 MAX_NESTED_DEPTH = 5  # Test deeper paths
 DEFAULT_NUM_EXAMPLES = 100
-DEFAULT_TARGETED_PROB = 0.25  # Fraction of examples that are targeted edge cases
+DEFAULT_TARGETED_PROB = 0.35  # Fraction of examples that are targeted edge cases
 FUSE_MOUNT_TIMEOUT = 30  # seconds to wait for FUSE mount
 BATCH_SIZE = 50  # Process in batches for better memory management
 CONTENT_CACHE_SIZE = 500  # Number of content samples to cache from Pile
+# Probability of emitting a sparse prompt (minimal tree) to simulate legacy eval sets
+SPARSE_PROMPT_PROB = 0.35
+MAX_FILE_SIZE_CHARS = 4000
+MAX_PROMPT_TOKENS = 15000
 
 # Sanitization helpers
 ALLOWED_CONTROL_CODES = {9, 10, 13}
@@ -276,16 +280,16 @@ EXCLUDED_FUSE_OPERATIONS = {
 # Balanced operation weights for random selection
 # Now includes read/write operations for complete filesystem functionality
 OPERATION_WEIGHTS = {
-    'mkdir': 0.12,      # Directory creation
+    'mkdir': 0.14,      # Directory creation
     'touch': 0.12,      # File creation (create)
     'write': 0.12,      # Write to file
-    'read': 0.12,       # Read from file
+    'read': 0.10,       # Read from file
     'rm': 0.10,         # File removal (unlink)
     'rmdir': 0.10,      # Directory removal
     'chmod': 0.08,      # Permission changes
     'chown': 0.08,      # Ownership changes
     'ls': 0.08,         # Directory listing (readdir)
-    'stat': 0.08,       # File information (getattr)
+    'stat': 0.06,       # File information (getattr)
     'truncate': 0.06,   # Truncate file
     'rename': 0.06,     # Rename/move file
     'symlink': 0.06,    # Create symbolic link
@@ -402,6 +406,34 @@ def get_random_existing_file(mount_dir: str) -> Optional[str]:
     return random.choice(files) if files else None
 
 
+def get_random_file(
+    mount_dir: str,
+    min_size: Optional[int] = None,
+) -> Optional[Tuple[str, int]]:
+    """Return a random regular file and its size."""
+    files: list[Tuple[str, int]] = []
+    try:
+        for root, _, filenames in os.walk(mount_dir):
+            rel_root = os.path.relpath(root, mount_dir)
+            if rel_root == '.':
+                rel_root = ''
+            for name in filenames:
+                if name in {'llm', '.fuse_hidden'}:
+                    continue
+                rel_path = os.path.join(rel_root, name) if rel_root else name
+                abs_path = os.path.join(mount_dir, rel_path)
+                try:
+                    st = os.stat(abs_path)
+                except OSError:
+                    continue
+                if min_size is not None and st.st_size < min_size:
+                    continue
+                files.append((rel_path, st.st_size))
+    except (OSError, PermissionError):
+        pass
+    return random.choice(files) if files else None
+
+
 def get_random_directory(mount_dir: str, require_children: bool = False) -> Optional[str]:
     """Select a random directory, optionally requiring at least one child entry."""
     candidates: list[str] = []
@@ -420,6 +452,22 @@ def get_random_directory(mount_dir: str, require_children: bool = False) -> Opti
         pass
 
     return random.choice(candidates) if candidates else None
+
+
+def get_random_empty_directory(mount_dir: str) -> Optional[str]:
+    """Return a random empty directory suitable for rmdir operations."""
+    empties: list[str] = []
+    try:
+        for root, dirs, files in os.walk(mount_dir):
+            dirs[:] = [d for d in dirs if d not in {'dev', 'proc', 'sys'}]
+            rel_root = os.path.relpath(root, mount_dir)
+            if rel_root in ('.', ''):
+                continue
+            if not dirs and not files:
+                empties.append(rel_root)
+    except (OSError, PermissionError):
+        pass
+    return random.choice(empties) if empties else None
 
 
 def ensure_minimum_regular_files(mount_dir: str, min_files: int = 1) -> None:
@@ -500,6 +548,25 @@ def ensure_directory_coverage(mount_dir: str, min_children: int = 2) -> None:
                     fh.write(content)
             populated_directory_present = True
             break
+
+
+def render_state_with_focus(
+    fs_state: FSState,
+    focus_paths: Optional[List[str]] = None,
+) -> str:
+    """Render the filesystem as XML ensuring full contents for focus paths."""
+    normalized_paths = set()
+    for path in focus_paths or []:
+        if not path:
+            continue
+        normalized_paths.add(path.strip(os.sep))
+
+    xml_str = fs_state.to_xml_string(
+        include_contents=True,
+        max_file_size=MAX_FILE_SIZE_CHARS,
+        full_content_paths=normalized_paths,
+    )
+    return sanitize_text_block(xml_str)
 
 
 def reset_mount_directory(mount_dir: str) -> None:
@@ -674,7 +741,7 @@ def generate_random_operation(mount_dir: str) -> Tuple[str, str]:
             return 'touch', f'touch {generate_random_filename()}'
 
 
-def generate_targeted_operation(mount_dir: str) -> Tuple[str, str]:
+def generate_targeted_operation(mount_dir: str) -> Tuple[str, str, Optional[List[str]]]:
     """
     Generate a targeted operation to reinforce known failure modes.
 
@@ -694,9 +761,13 @@ def generate_targeted_operation(mount_dir: str) -> Tuple[str, str]:
 
     scenario = random.choice([
         'nested_mkdir',
-        'rename_text',
-        'symlink_text',
+        'truncate_existing',
+        'overwrite_existing',
+        'unlink_existing',
+        'rmdir_empty',
+        'symlink_existing',
         'write_text_log',
+        'write_then_read',
     ])
 
     match scenario:
@@ -704,28 +775,130 @@ def generate_targeted_operation(mount_dir: str) -> Tuple[str, str]:
             # Deeply nested directory creation
             parts = [generate_random_dirname(), generate_random_dirname(), generate_random_dirname()]
             path = "/".join(parts)
-            return 'mkdir', f"mkdir -p {shlex.quote(path)}"
+            return 'mkdir', f"mkdir -p {shlex.quote(path)}", None
 
-        case 'rename_text':
-            # Rename/symlink operations should ONLY operate on existing files
-            # Fall back to the regular random operation generator which handles this correctly
-            return generate_random_operation(mount_dir)
+        case 'truncate_existing':
+            candidate = get_random_file(mount_dir, min_size=16)
+            if not candidate:
+                return generate_random_operation(mount_dir)
+            rel_path, size = candidate
+            new_size = random.randint(0, max(1, size - 1))
+            script = (
+                "python3 - <<'PY'\n"
+                "import os\n"
+                f"path = {repr(rel_path)}\n"
+                f"os.truncate(path, {new_size})\n"
+                "PY"
+            )
+            return 'truncate', script, [rel_path]
 
-        case 'symlink_text':
-            # Rename/symlink operations should ONLY operate on existing files
-            # Fall back to the regular random operation generator which handles this correctly
-            return generate_random_operation(mount_dir)
+        case 'overwrite_existing':
+            candidate = get_random_file(mount_dir)
+            if not candidate:
+                return generate_random_operation(mount_dir)
+            rel_path, _ = candidate
+            overwrite_content = generate_deterministic_content(rel_path + ':overwrite')
+            script = (
+                "python3 - <<'PY'\n"
+                "from pathlib import Path\n"
+                f"path = Path({repr(rel_path)})\n"
+                "path.parent.mkdir(parents=True, exist_ok=True)\n"
+                f"path.write_text({repr(overwrite_content)}, encoding='utf-8')\n"
+                "PY"
+            )
+            return 'write', script, [rel_path]
+
+        case 'unlink_existing':
+            candidate = get_random_file(mount_dir)
+            if not candidate:
+                return generate_random_operation(mount_dir)
+            rel_path, _ = candidate
+            return 'unlink', f"rm -f {shlex.quote(rel_path)}", [rel_path]
+
+        case 'rmdir_empty':
+            empty_dir = get_random_empty_directory(mount_dir)
+            if not empty_dir:
+                return generate_random_operation(mount_dir)
+            return 'rmdir', f"rmdir {shlex.quote(empty_dir)}", [empty_dir]
+
+        case 'symlink_existing':
+            candidate = get_random_file(mount_dir)
+            if not candidate:
+                return generate_random_operation(mount_dir)
+            rel_path, _ = candidate
+            link_name = f"{rel_path}_link"
+            script = (
+                "python3 - <<'PY'\n"
+                "from pathlib import Path\n"
+                f"target = Path({repr(rel_path)})\n"
+                f"link = Path({repr(link_name)})\n"
+                "link.parent.mkdir(parents=True, exist_ok=True)\n"
+                "if link.exists() or link.is_symlink():\n"
+                "    link.unlink()\n"
+                "link.symlink_to(target)\n"
+                "PY"
+            )
+            return 'symlink', script, [rel_path]
 
         case 'write_text_log':
             fname = generate_random_filename()
             # Deterministic, printable log content (no NULs)
             text = "[INFO] init\n[DEBUG] step1\n[INFO] done"
             cmd = f"printf %s {shlex.quote(text)} > {shlex.quote(fname)}"
-            return 'write', cmd
+            return 'write', cmd, None
+
+        case 'write_then_read':
+            fname = generate_random_filename()
+            content = generate_deterministic_content(fname)
+            writer = (
+                "python3 - <<'PY'\n"
+                "from pathlib import Path\n"
+                f"Path({repr(fname)}).write_text({repr(content)}, encoding='utf-8')\n"
+                "PY"
+            )
+            cmd = f"{writer}\ncat {shlex.quote(fname)}"
+            return 'read', cmd, None
 
         case _:
-            return generate_random_operation(mount_dir)
+            return (*generate_random_operation(mount_dir), None)
 
+
+def generate_sparse_operation(mount_dir: str) -> Tuple[str, str]:
+    """
+    Generate an operation on an almost-empty filesystem to simulate legacy prompts.
+    Only uses operations that succeed without pre-existing files.
+    """
+    import random, shlex
+
+    choice = random.choice(['mkdir', 'create', 'write', 'truncate', 'readdir'])
+
+    if choice == 'mkdir':
+        path = generate_random_dirname()
+        return 'mkdir', f"mkdir -p {shlex.quote(path)}"
+
+    if choice == 'create':
+        fname = generate_random_filename()
+        return 'create', f"touch {shlex.quote(fname)}"
+
+    if choice == 'write':
+        fname = generate_random_filename()
+        content = generate_deterministic_content(fname)
+        writer = (
+            "python3 - <<'PY'\n"
+            "from pathlib import Path\n"
+            f"Path({repr(fname)}).write_text({repr(content)}, encoding='utf-8')\n"
+            "PY"
+        )
+        return 'write', writer
+
+    if choice == 'truncate':
+        fname = generate_random_filename()
+        size = random.randint(0, 64)
+        # truncate -s <size> creates the file if it does not exist
+        return 'truncate', f"truncate -s {size} {shlex.quote(fname)}"
+
+    # Default to readdir on root
+    return 'ls', 'ls -la .'
 def execute_command(command: str, mount_dir: str) -> Tuple[bool, str]:
     """
     Execute a shell command in the given directory.
@@ -760,52 +933,55 @@ def generate_example_in_session(mount_dir: str, log_file: str, targeted_prob: fl
     with open(log_file, 'w'):
         pass
 
-    num_setup_ops = random.choices([0, 1, 2, 3], weights=[20, 30, 30, 20])[0]
-    for _ in range(num_setup_ops):
-        try:
-            _, setup_command = generate_random_operation(mount_dir)
-        except OperationSelectionError:
-            continue
-        execute_command(setup_command, mount_dir)
+    force_sparse_prompt = random.random() < SPARSE_PROMPT_PROB
 
-    if random.random() < 0.5:
-        filename = generate_random_filename()
-        content = generate_deterministic_content(filename)
-        file_path = os.path.join(mount_dir, filename)
-        try:
-            with open(file_path, 'w') as f:
-                f.write(content)
-        except Exception:
-            pass
+    if not force_sparse_prompt:
+        num_setup_ops = random.choices([0, 1, 2, 3], weights=[20, 30, 30, 20])[0]
+        for _ in range(num_setup_ops):
+            try:
+                _, setup_command = generate_random_operation(mount_dir)
+            except OperationSelectionError:
+                continue
+            execute_command(setup_command, mount_dir)
 
-    ensure_minimum_regular_files(mount_dir, min_files=1)
-    ensure_directory_coverage(mount_dir, min_children=2)
+        if random.random() < 0.5:
+            filename = generate_random_filename()
+            content = generate_deterministic_content(filename)
+            file_path = os.path.join(mount_dir, filename)
+            try:
+                with open(file_path, 'w') as f:
+                    f.write(content)
+            except Exception:
+                pass
+
+        ensure_minimum_regular_files(mount_dir, min_files=1)
+        ensure_directory_coverage(mount_dir, min_children=2)
 
     fs_state = FSState(mount_dir)
     fs_state.sync_from_fs()
-
-    max_file_size = 300
-    max_tokens = 5000
-
-    estimated_tokens = fs_state.estimate_token_count(include_contents=True, max_file_size=max_file_size)
-    if estimated_tokens > max_tokens * 0.6:
-        max_file_size = max(100, max_file_size // 2)
-        estimated_tokens = fs_state.estimate_token_count(include_contents=True, max_file_size=max_file_size)
-
-    initial_state = sanitize_tree_string(
-        fs_state.to_tree_string(include_contents=True, max_file_size=max_file_size)
-    )
+    focus_paths: Optional[List[str]] = None
 
     with open(log_file, 'w'):
         pass
 
-    use_targeted = random.random() < max(0.0, min(1.0, targeted_prob))
     try:
-        if use_targeted:
-            operation_type, shell_command = generate_targeted_operation(mount_dir)
+        if force_sparse_prompt:
+            op_result = generate_sparse_operation(mount_dir)
+            operation_type, shell_command = op_result[:2]
+            focus_paths = op_result[2] if len(op_result) > 2 else None
         else:
-            operation_type, shell_command = generate_random_operation(mount_dir)
+            use_targeted = random.random() < max(0.0, min(1.0, targeted_prob))
+            if use_targeted:
+                op_result = generate_targeted_operation(mount_dir)
+            else:
+                op_result = generate_random_operation(mount_dir)
+            operation_type, shell_command = op_result[:2]
+            focus_paths = op_result[2] if len(op_result) > 2 else None
     except OperationSelectionError:
+        return None
+
+    initial_state = render_state_with_focus(fs_state, focus_paths)
+    if len(initial_state) // 4 > MAX_PROMPT_TOKENS:
         return None
 
     success, output = execute_command(shell_command, mount_dir)
@@ -844,18 +1020,23 @@ def generate_example_in_session(mount_dir: str, log_file: str, targeted_prob: fl
         else:
             operation_str = f"{fuse_operation['operation']}('{fuse_operation['path']}')"
 
+    if actual_operation == 'read' and fuse_operation:
+        # Ensure the prompt contains the full body of the file being read.
+        read_path = fuse_operation.get('path', '/')
+        clean_path = read_path.strip('/')
+        full_content_paths = {clean_path} if clean_path else {''}
+        initial_state = render_state_with_focus(fs_state, list(full_content_paths))
+
     if actual_operation in query_operations:
         result = generate_query_response(actual_operation, fuse_operation, output, success, fs_state)
         op_type = "query"
     else:
-        result = sanitize_tree_string(
-            fs_state.to_tree_string(include_contents=True, max_file_size=max_file_size)
-        )
+        result = render_state_with_focus(fs_state, focus_paths)
         op_type = "state_change"
 
     total_content = initial_state + operation_str + result
     final_tokens = len(total_content) // 4
-    if final_tokens > max_tokens:
+    if final_tokens > MAX_PROMPT_TOKENS:
         return None
 
     return {
@@ -984,7 +1165,7 @@ def generate_query_response(operation: str, fuse_operation: Optional[Dict[str, A
             
             # Return as JSON list for consistency
             entries = normalize_readdir_entries(entries)
-            return json.dumps(entries)
+            return json.dumps(entries, separators=(',', ':'))
             
         except Exception as e:
             return f"ERROR: Failed to read directory {path}: {e}"
@@ -1221,12 +1402,11 @@ def convert_to_hf_format(examples: List[Dict[str, Any]]) -> List[Dict[str, str]]
         if op_type == 'state_change':
             # STATE MONAD: State -> Operation -> State
             prompt = f"<W>\n{operation}\n---\n{current_state}"
-        
+            completion = f"{example['result']}\n{STATE_STOP_TOKEN}"
         else:  # op_type == 'query'
             # STATE QUERY: State -> Query -> Result
             prompt = f"<R>\n{operation}\n---\n{current_state}"
-        
-        completion = example['result']
+            completion = example['result']
         
         hf_examples.append({
             'prompt': prompt,
@@ -1245,8 +1425,16 @@ def save_hf_format(examples: List[Dict[str, Any]], output_file: str) -> None:
     """
     hf_examples = convert_to_hf_format(examples)
     
+    def validate_text(text: str, field_name: str) -> None:
+        if "... (" in text:
+            raise ValueError(
+                f"Detected legacy truncation marker in {field_name}; dataset must contain full bodies."
+            )
+
     with open(output_file, 'w') as f:
         for example in hf_examples:
+            validate_text(example['prompt'], 'prompt')
+            validate_text(example['completion'], 'completion')
             f.write(json.dumps(example) + '\n')
 
 def main():

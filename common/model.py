@@ -14,6 +14,8 @@ import numpy as np
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+from llmfuse.utils import STATE_STOP_TOKEN
+
 QWEN3_4B_SHORT_NAME = "qwen3-4b"
 QWEN3_4B_HF_ID = "Qwen/Qwen3-4B"
 MAX_GENERATION_TOKENS = 1024
@@ -79,7 +81,10 @@ def get_model_response(
         )
 
     generated = outputs[0][inputs["input_ids"].shape[1]:]
-    return tokenizer.decode(generated, skip_special_tokens=True).strip()
+    text = tokenizer.decode(generated, skip_special_tokens=True).strip()
+    if STATE_STOP_TOKEN in text:
+        text = text.split(STATE_STOP_TOKEN, 1)[0].strip()
+    return text
 
 
 def get_model_logprobs(

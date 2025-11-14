@@ -16,6 +16,7 @@ fusepy>=3.0.1
 # fractions is a built-in Python module - no need to install
 
 # Additional utilities
+requests>=2.31.0
 pickle-mixin>=1.0.2
 
 # Development and testing

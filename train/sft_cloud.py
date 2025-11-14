@@ -15,6 +15,11 @@ from datasets import Dataset
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from trl import SFTTrainer, SFTConfig
 
+from llmfuse.utils import STATE_STOP_TOKEN
+
+
+DEFAULT_MAX_SEQ_LENGTH = int(os.environ.get("LLMFUSE_SFT_MAX_SEQ", 8192))
+
 
 def setup_distributed():
     """Initialize distributed training."""
@@ -153,11 +158,10 @@ def main():
         warmup_ratio=0.1,
         weight_decay=0.01,
         logging_steps=1,
-        save_steps=50,
-        save_total_limit=3,
-        save_strategy="steps",
+        save_strategy="epoch",
+        save_total_limit=1,
         bf16=True,
-        max_seq_length=512,  # Reduced for memory efficiency
+        max_seq_length=DEFAULT_MAX_SEQ_LENGTH,
         dataset_text_field="text",
         packing=False,
         report_to="wandb" if args.use_wandb else "none",
@@ -202,8 +206,10 @@ def main():
             )
         else:
             contract = (
-                "Return exactly one filesystem tree starting with '/'. Output nothing else,\n"
-                "and do not repeat the tree."
+                "Return exactly one <filesystem> XML document that represents the full state.\n"
+                "It must start with <filesystem> and end with </filesystem> with no commentary,\n"
+                f"then append the literal token {STATE_STOP_TOKEN} on its own line with nothing after it.\n"
+                "Do not repeat or summarize the tree."
             )
         return f"{header}{contract}\n\n{original_prompt}"
 

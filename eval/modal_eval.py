@@ -30,6 +30,7 @@ image = (
     ])
     .workdir("/root")
     .add_local_dir("eval", "/root/eval")
+    .add_local_dir("llmfuse", "/root/llmfuse")
     .add_local_dir("data", "/root/data")
 )
 

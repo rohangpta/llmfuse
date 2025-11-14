@@ -21,6 +21,9 @@ BYTES_PER_KB = 1024
 BYTES_PER_MB = 1024 * 1024
 BYTES_PER_GB = 1024 * 1024 * 1024
 
+# Generation contract constants
+STATE_STOP_TOKEN = "<END_FS>"
+
 def extract_result_from_llm_output(output: str) -> str:
     """
     Extracts the result string from within the <result> tags.
@@ -32,6 +35,8 @@ def extract_result_from_llm_output(output: str) -> str:
         The content within <result> tags, or the original output if no tags found
     """
     match = re.search(r'<result>(.*?)</result>', output, re.DOTALL)
-    if match:
-        return match.group(1).strip()
-    return output.strip()  # Fallback 
+    candidate = match.group(1) if match else output
+    cleaned = candidate.strip()
+    if cleaned.endswith(STATE_STOP_TOKEN):
+        cleaned = cleaned[: -len(STATE_STOP_TOKEN)].strip()
+    return cleaned

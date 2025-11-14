@@ -245,6 +245,10 @@ def train_qwen(
         env = os.environ.copy()
         if use_wandb:
             env["WANDB_PROJECT"] = "qwen3-filesystem-sft"
+        # Improve Hugging Face download robustness during model bootstrap
+        env.setdefault("HF_HUB_HTTP_TIMEOUT", "60")
+        env.setdefault("HF_HUB_DOWNLOAD_RETRIES", "5")
+        env.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "0")
 
         # Prepare torchrun arguments
         torchrun_args = [

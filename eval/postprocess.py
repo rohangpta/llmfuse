@@ -1,6 +1,8 @@
 import re
 from typing import Tuple
 
+from llmfuse.utils import STATE_STOP_TOKEN
+
 EXCLUDED_PREFIXES = ("<think",)
 
 
@@ -14,47 +16,45 @@ def strip_think(text: str) -> str:
     return "\n".join(lines).strip()
 
 
-def is_tree_expected(expected: str) -> bool:
-    return expected.lstrip().startswith('/') if expected else False
+def is_state_expected(expected: str) -> bool:
+    """Detect whether the expected output is a filesystem tree/XML blob."""
+    if not expected:
+        return False
+    stripped = expected.lstrip()
+    return stripped.startswith('<filesystem') or stripped.startswith('/')
 
 
-def remove_duplicate_trees(predicted: str) -> str:
-    """Remove obvious duplicate filesystem trees from output."""
-    if not predicted or predicted.count('\n/') <= 1:
-        return predicted
-    
-    # Split on lines that start with '/' (tree roots)
-    parts = []
-    current_part = []
-    
-    for line in predicted.splitlines():
-        if line.strip().startswith('/') and current_part:
-            # Found a new tree, save the previous one
-            parts.append('\n'.join(current_part))
-            current_part = [line]
-        else:
-            current_part.append(line)
-    
-    if current_part:
-        parts.append('\n'.join(current_part))
-    
-    # Return just the first complete tree
-    return parts[0].strip() if parts else predicted.strip()
+def _extract_xml_state(predicted: str) -> str | None:
+    if not predicted:
+        return None
+    text = predicted.strip()
+    start = text.find('<filesystem')
+    if start == -1:
+        return None
+    end = text.find('</filesystem>', start)
+    if end == -1:
+        return text[start:].strip()
+    end += len('</filesystem>')
+    return text[start:end].strip()
 
 
-def sanitize_tree_output(predicted: str) -> str:
+def sanitize_state_output(predicted: str) -> str:
     if not predicted:
         return predicted
     
-    # First remove duplicates
-    predicted = remove_duplicate_trees(predicted)
-    
-    # Then find the tree start
-    lines = predicted.splitlines()
-    for i, ln in enumerate(lines):
-        if ln.strip().startswith('/'):
-            return "\n".join(lines[i:]).strip()
+    xml_block = _extract_xml_state(predicted)
+    if xml_block is not None:
+        return xml_block
     return predicted.strip()
+
+
+def strip_state_stop_token(text: str | None) -> str | None:
+    if not text:
+        return text
+    stripped = text.rstrip()
+    if stripped.endswith(STATE_STOP_TOKEN):
+        stripped = stripped[: -len(STATE_STOP_TOKEN)].rstrip()
+    return stripped
 
 
 def sanitize_read_output(predicted: str) -> str:
@@ -107,7 +107,7 @@ def _strip_chatter(predicted: str) -> str:
     if not predicted:
         return predicted
     # Remove trailing common chatter markers
-    parts = re.split(r"(```|\[EOF\]|^Answer:|^Explanation:)", predicted, maxsplit=1, flags=re.IGNORECASE | re.MULTILINE)
+    parts = re.split(r"(\[EOF\]|^Answer:|^Explanation:)", predicted, maxsplit=1, flags=re.IGNORECASE | re.MULTILINE)
     return parts[0].strip() if parts else predicted.strip()
 
 
@@ -136,9 +136,10 @@ def sanitize_by_expected(predicted: str, expected: str) -> str:
         return ""
 
     # Route based on expected shape
-    if is_tree_expected(expected):
-        cleaned = sanitize_tree_output(predicted)
-        return clamp_to_expected(cleaned, expected)
+    if is_state_expected(expected):
+        cleaned_expected = strip_state_stop_token(expected) if expected else expected
+        cleaned_predicted = strip_state_stop_token(sanitize_state_output(predicted))
+        return clamp_to_expected(cleaned_predicted, cleaned_expected)
 
     if expected and expected.strip().startswith("["):
         cleaned = sanitize_readdir_output(predicted, expected)
