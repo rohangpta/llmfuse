@@ -1,25 +1,29 @@
-FROM python:3.9-slim
+FROM python:3.11-slim
 
-# Install FUSE and other dependencies
+ENV PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
+
+# Install FUSE3 and build essentials for fusepy
 RUN apt-get update && \
-    apt-get install -y fuse && \
+    apt-get install -y --no-install-recommends \
+        fuse \
+        libfuse-dev \
+        fuse3 \
+        libfuse3-dev \
+        pkg-config \
+        ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
-# Create app directory
 WORKDIR /app
 
-# Copy requirements and install Python dependencies
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Minimal runtime dependencies (remote inference only)
+RUN pip install --no-cache-dir fusepy requests
 
-# Copy the source code
-COPY src/ ./src/
+# Copy the entire repository (keeps infra + data helpers for reference)
+COPY . .
 
-# Create mount point
-RUN mkdir /mnt/fuse
+RUN mkdir -p /mnt/llmfuse && echo "user_allow_other" >> /etc/fuse.conf
 
-# Add FUSE device support
-RUN echo "user_allow_other" >> /etc/fuse.conf
+VOLUME ["/mnt/llmfuse"]
 
-# Run with FUSE device access
-ENTRYPOINT ["python", "src/mount_llmfuse.py", "/mnt/fuse"]
+ENTRYPOINT ["python", "-m", "llmfuse.llmfuse", "/mnt/llmfuse"]

@@ -1,46 +1,20 @@
 version: '3.8'
 
 services:
-  # FUSE filesystem service
-  fuse:
-    build:
-      context: .
-      dockerfile: Dockerfile.llmfuse
-    privileged: true  # Required for FUSE
-    volumes:
-      - ./src:/app/src  # Mount source code for development
-      - ./train:/app/train  # Mount training code
-    devices:
-      - /dev/fuse:/dev/fuse  # Give access to FUSE device
-    cap_add:
-      - SYS_ADMIN  # Required for FUSE
-    security_opt:
-      - apparmor:unconfined  # Required for FUSE
-
-  # Data generation service (Linux environment for consistent stat output)
+  # FUSE-enabled data generation service
   datagen:
     build:
       context: .
       dockerfile: Dockerfile.datagen
-    volumes:
-      - ./data:/app/data
-      - ./src:/app/src:ro  # Mount source as read-only
-      - ./train:/app/train:ro  # Mount training code as read-only
-    environment:
-      - PYTHONPATH=/app
-      - PYTHONUNBUFFERED=1
-    command: ["python", "-c", "import os; os.makedirs('/app/data', exist_ok=True); from train.generate_data import generate_data; generate_data(num_examples=100, output_file='/app/data/training_data_linux.json')"]
-    
-  # FUSE-enabled data generation service
-  datagen-fuse:
-    build:
-      context: .
-      dockerfile: Dockerfile.datagen
     privileged: true  # Required for FUSE
     volumes:
       - ./data:/app/data
-      - ./src:/app/src:ro
-      - ./train:/app/train:ro  # Mount training code as read-only
+      - ./models:/app/models:ro
+      - ./common:/app/common:ro
+      - ./train:/app/train:ro
+      - ./eval:/app/eval:ro
+      - ./llmfuse:/app/llmfuse:ro
+      - ./llmencode:/app/llmencode:ro
     devices:
       - /dev/fuse:/dev/fuse
     cap_add:
@@ -50,24 +24,36 @@ services:
     environment:
       - PYTHONPATH=/app
       - PYTHONUNBUFFERED=1
-    command: ["python", "-c", "import os; os.makedirs('/app/data', exist_ok=True); from train.generate_data import generate_data; generate_data(num_examples=50, output_file='/app/data/training_data_fuse.json')"]
-    
-  # Evaluation service
-  eval:
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+    command: ["python", "-m", "train.generate_data", "--num_examples", "100", "--output_dir", "/app/data/train"]
+
+  # Integration test: mount LLM-backed FUSE and run end-to-end ops
+  fuse_integration:
     build:
       context: .
       dockerfile: Dockerfile.datagen
+    privileged: true  # Required for FUSE
+    devices:
+      - /dev/fuse:/dev/fuse
+    cap_add:
+      - SYS_ADMIN
+    security_opt:
+      - apparmor:unconfined
     volumes:
       - ./data:/app/data
-      - ./src:/app/src:ro
-      - ./train:/app/train:ro  # Mount training code as read-only
-      - ./eval:/app/eval:ro  # Mount evaluation code as read-only
+      - ./common:/app/common:ro
+      - ./train:/app/train:ro
+      - ./eval:/app/eval:ro
+      - ./llmfuse:/app/llmfuse:ro
+      - ./llmencode:/app/llmencode:ro
     environment:
       - PYTHONPATH=/app
       - PYTHONUNBUFFERED=1
       - GEMINI_API_KEY=${GEMINI_API_KEY}
-    command: ["python", "-c", "from eval.eval import evaluate_dataset; evaluate_dataset('/app/data/training_data_sft.jsonl', '/app/data/eval_results_sft.json', max_examples=20)"]
-    depends_on:
-      - datagen
-
-
+      # Optional: choose model backend for llmfuse
+      - LLMFUSE_MODEL=${LLMFUSE_MODEL:-qwen3-0.6b}
+      # Mountpoint inside the container
+      - FUSE_MOUNT=/tmp/fuse_mount
+      # Test script to run against the mounted fs
+      - INTEG_SCRIPT=/app/eval/llmfuse_integration_test.py
+    command: ["bash", "-lc", "set -euo pipefail; mkdir -p \"$FUSE_MOUNT\"; python llmfuse/llmfuse.py \"$FUSE_MOUNT\" & pid=$$!; sleep 2; python \"$INTEG_SCRIPT\" \"$FUSE_MOUNT\"; rc=$$?; fusermount -u \"$FUSE_MOUNT\" || umount \"$FUSE_MOUNT\" || true; kill $$pid || true; exit $$rc"]

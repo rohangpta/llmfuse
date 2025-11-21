@@ -10,6 +10,7 @@ On macOS, use: docker-compose run --rm --privileged datagen-fuse python -m train
 """
 # Standard library imports
 import argparse
+import hashlib
 import json
 import multiprocessing
 import os
@@ -22,38 +23,241 @@ import sys
 import tempfile
 import threading
 import time
+from pathlib import Path
 from typing import Dict, List, Tuple, Any, Optional
 
+# Note: datasets library not needed - we use custom content generation
+
 # Local imports
-from src.fs_state import FSState, FileEntry
-from src.utils import DEFAULT_FILE_MODE, DEFAULT_DIR_MODE
+from llmfuse.fs_state import FSState, FileEntry
+from llmfuse.utils import DEFAULT_FILE_MODE, DEFAULT_DIR_MODE, STATE_STOP_TOKEN
 
 # Generation constants
 MIN_SETUP_OPERATIONS = 2
 MAX_SETUP_OPERATIONS = 8
 MIN_FILE_SIZE = 1
 MAX_FILE_SIZE = 500
-MIN_NESTED_DEPTH = 1
-MAX_NESTED_DEPTH = 4
+MIN_NESTED_DEPTH = 2  # Actual nesting starts at 2 (e.g., /a/b)
+MAX_NESTED_DEPTH = 5  # Test deeper paths
 DEFAULT_NUM_EXAMPLES = 100
-FUSE_MOUNT_TIMEOUT = 15  # seconds to wait for FUSE mount
+DEFAULT_TARGETED_PROB = 0.35  # Fraction of examples that are targeted edge cases
+FUSE_MOUNT_TIMEOUT = 30  # seconds to wait for FUSE mount
 BATCH_SIZE = 50  # Process in batches for better memory management
+CONTENT_CACHE_SIZE = 500  # Number of content samples to cache from Pile
+# Probability of emitting a sparse prompt (minimal tree) to simulate legacy eval sets
+SPARSE_PROMPT_PROB = 0.35
+MAX_FILE_SIZE_CHARS = 4000
+MAX_PROMPT_TOKENS = 15000
+
+# Sanitization helpers
+ALLOWED_CONTROL_CODES = {9, 10, 13}
+
+
+def sanitize_text_block(text: str | None) -> str:
+    """Remove NULs and disallowed control characters while preserving layout."""
+    if not text:
+        return ""
+
+    sanitized_chars: list[str] = []
+    for ch in text:
+        code = ord(ch)
+        if code == 0:
+            continue
+        if code < 32 and code not in ALLOWED_CONTROL_CODES:
+            continue
+        sanitized_chars.append(ch)
+    return ''.join(sanitized_chars)
+
+
+def sanitize_tree_string(tree: str | None) -> str:
+    """Sanitize a filesystem tree representation."""
+    if not tree:
+        return ""
+    return sanitize_text_block(tree).strip()
+
+
+def sanitize_read_response(text: str | None) -> str:
+    """Sanitize file content responses while preserving leading/trailing whitespace."""
+    if text is None:
+        return ""
+    return sanitize_text_block(text)
+
+
+def normalize_readdir_entries(entries: list[str]) -> list[str]:
+    """Ensure directory listings are deduped, sorted, and include dot entries."""
+    seen = set()
+    normalized: list[str] = []
+
+    # Always ensure '.' and '..' appear first exactly once
+    for special in ('.', '..'):
+        if special not in seen:
+            normalized.append(special)
+            seen.add(special)
+
+    others = []
+    for entry in entries:
+        if entry in ('.', '..'):
+            continue
+        if entry in seen:
+            continue
+        seen.add(entry)
+        others.append(entry)
+
+    normalized.extend(sorted(others))
+    return normalized
+
+
+class OperationSelectionError(Exception):
+    """Raised when an operation cannot be generated for the current filesystem state."""
+
+
+class DeterministicContentGenerator:
+    """Generate deterministic content for files based on filepath hash."""
+    
+    def __init__(self):
+        # Content generation vocabulary (same as before)
+        self.nouns = ['server', 'client', 'database', 'user', 'session', 'config', 'cache', 'token', 'request', 'response', 'data', 'file', 'process', 'thread', 'connection', 'query', 'result', 'error', 'warning', 'message']
+        self.adjectives = ['fast', 'slow', 'new', 'old', 'active', 'inactive', 'valid', 'invalid', 'critical', 'important', 'temporary', 'permanent', 'secure', 'unsafe', 'optimized', 'legacy']
+        self.verbs = ['start', 'stop', 'create', 'delete', 'update', 'fetch', 'send', 'receive', 'process', 'validate', 'initialize', 'terminate', 'connect', 'disconnect', 'load', 'save']
+        self.log_levels = ['DEBUG', 'INFO', 'WARN', 'ERROR', 'FATAL', 'TRACE']
+        self.func_names = ['main', 'init', 'process', 'handle', 'get', 'set', 'update', 'delete', 'validate', 'parse', 'format', 'convert', 'transform', 'calculate', 'compute']
+        self.var_names = ['data', 'result', 'value', 'count', 'index', 'temp', 'buffer', 'cache', 'config', 'settings', 'params', 'args', 'status', 'state', 'info']
+    
+    def _get_seeded_random(self, filepath: str) -> random.Random:
+        """Get a seeded Random instance based on filepath hash."""
+        hash_val = hashlib.sha256(filepath.encode()).hexdigest()
+        seed = int(hash_val[:16], 16)  # Use first 16 hex chars for seed
+        return random.Random(seed)
+    
+    def _generate_code_content(self, rng: random.Random) -> str:
+        """Generate deterministic code content using seeded RNG."""
+        lang = rng.choice(['python', 'javascript', 'bash', 'go', 'rust'])
+        
+        if lang == 'python':
+            func = rng.choice(self.func_names)
+            var1 = rng.choice(self.var_names)
+            var2 = rng.choice(self.var_names)
+            return f'''import os\nimport sys\nimport {rng.choice(['json', 'time', 'logging', 'requests', 'argparse'])}\n\ndef {func}({var1}):\n    """{rng.choice(self.verbs).capitalize()} the {var1}."""\n    {var2} = {rng.randint(0, 100)}\n    if {var1} is None:\n        raise ValueError("{var1} cannot be None")\n    return {var2}\n\nif __name__ == "__main__":\n    result = {func}({rng.randint(1, 50)})\n    print(f"Result: {{result}}")'''
+        
+        elif lang == 'javascript':
+            func = rng.choice(self.func_names)
+            var1 = rng.choice(self.var_names)
+            return f'''const {var1} = {rng.randint(0, 100)};\n\nfunction {func}(input) {{\n  if (!input) {{\n    throw new Error('Input required');\n  }}\n  return input * {rng.randint(2, 10)};\n}}\n\nmodule.exports = {{ {func} }};'''
+        
+        elif lang == 'bash':
+            var = rng.choice(self.var_names).upper()
+            return f'''#!/bin/bash\nset -euo pipefail\n\n{var}="{rng.choice(self.nouns)}"\necho "Starting ${{SCRIPT_NAME}}"\n\nif [ -z "${{1:-}}" ]; then\n  echo "Usage: $0 <arg>"\n  exit 1\nfi\n\necho "Processing: $1"\nexit 0'''
+        
+        elif lang == 'go':
+            func = rng.choice(self.func_names).capitalize()
+            return f'''package main\n\nimport (\n\t"fmt"\n\t"log"\n)\n\nfunc {func}(val int) (int, error) {{\n\tif val < 0 {{\n\t\treturn 0, fmt.Errorf("invalid value: %d", val)\n\t}}\n\treturn val * {rng.randint(2, 10)}, nil\n}}\n\nfunc main() {{\n\tresult, err := {func}({rng.randint(1, 50)})\n\tif err != nil {{\n\t\tlog.Fatal(err)\n\t}}\n\tfmt.Println(result)\n}}'''
+        
+        else:  # rust
+            func = rng.choice(self.func_names)
+            return f'''fn {func}(x: i32) -> Result<i32, String> {{\n    if x < 0 {{\n        return Err(format!("Invalid input: {{}}", x));\n    }}\n    Ok(x * {rng.randint(2, 10)})\n}}\n\nfn main() {{\n    match {func}({rng.randint(1, 50)}) {{\n        Ok(result) => println!("Result: {{}}", result),\n        Err(e) => eprintln!("Error: {{}}", e),\n    }}\n}}'''
+    
+    def _generate_text_content(self, rng: random.Random) -> str:
+        """Generate deterministic text content using seeded RNG."""
+        content_type = rng.choice(['article', 'log', 'note', 'documentation'])
+        
+        if content_type == 'article':
+            topic = rng.choice(self.nouns)
+            return f'''# {topic.capitalize()}\n\nThe {topic} system provides {rng.choice(self.adjectives)} functionality for handling {rng.choice(['operations', 'requests', 'data', 'processes'])}.\n\n## Overview\n\nThis document describes the {topic} implementation and its key features.\n\n## Key Features\n\n- {rng.choice(self.verbs).capitalize()} operations\n- {rng.choice(self.adjectives).capitalize()} performance\n- Support for {rng.choice(['async', 'sync', 'batch', 'streaming'])} processing\n\n## Usage\n\nTo use the {topic}, follow these steps:\n\n1. Initialize the {topic}\n2. Configure parameters\n3. Execute operations\n4. Handle results'''
+        
+        elif content_type == 'log':
+            lines = []
+            for i in range(rng.randint(5, 15)):
+                level = rng.choice(self.log_levels)
+                timestamp = f"2025-01-{rng.randint(1, 28):02d} {rng.randint(0, 23):02d}:{rng.randint(0, 59):02d}:{rng.randint(0, 59):02d}"
+                action = rng.choice(self.verbs)
+                noun = rng.choice(self.nouns)
+                lines.append(f"[{level}] {timestamp} - {action.capitalize()} {noun} (id={rng.randint(1000, 9999)})")
+            return '\n'.join(lines)
+        
+        elif content_type == 'note':
+            return f'''TODO: {rng.choice(self.verbs).capitalize()} the {rng.choice(self.nouns)}\n\nNotes:\n- {rng.choice(self.adjectives).capitalize()} approach needed\n- Consider {rng.choice(['performance', 'security', 'scalability', 'maintainability'])}\n- Status: {rng.choice(['in progress', 'pending review', 'completed', 'blocked'])}\n- Priority: {rng.choice(['high', 'medium', 'low'])}'''
+        
+        else:  # documentation
+            component = rng.choice(self.nouns)
+            return f'''## {component.capitalize()} API\n\n### Methods\n\n#### {rng.choice(self.func_names)}()\n\n{rng.choice(self.verbs).capitalize()}s the {component}.\n\n**Parameters:**\n- `{rng.choice(self.var_names)}`: Input {rng.choice(self.nouns)}\n- `{rng.choice(['timeout', 'retries', 'verbose'])}`: Optional {rng.choice(['int', 'bool', 'str'])}\n\n**Returns:** {rng.choice(['bool', 'str', 'dict', 'list'])}\n\n**Example:**\n```\n{rng.choice(self.func_names)}({rng.choice(self.var_names)}={rng.randint(1, 100)})\n```'''
+    
+    def _generate_structured_content(self, rng: random.Random) -> str:
+        """Generate deterministic structured content using seeded RNG."""
+        format_type = rng.choice(['json', 'yaml', 'config', 'env'])
+        
+        if format_type == 'json':
+            key1 = rng.choice(self.var_names)
+            key2 = rng.choice(self.nouns)
+            return f'''{{\n  "{key1}": "{rng.choice(self.adjectives)}-{rng.choice(self.nouns)}",\n  "{key2}": {rng.randint(1, 1000)},\n  "enabled": {rng.choice(['true', 'false'])},\n  "options": [{rng.randint(1, 10)}, {rng.randint(10, 100)}],\n  "{rng.choice(['timestamp', 'id', 'version'])}": "{rng.randint(1000000, 9999999)}"\n}}'''
+        
+        elif format_type == 'yaml':
+            key1 = rng.choice(self.var_names)
+            key2 = rng.choice(self.nouns)
+            return f'''{key1}: {rng.choice(self.adjectives)}-{rng.choice(self.nouns)}\n{key2}:\n  {rng.choice(self.var_names)}: {rng.randint(1, 1000)}\n  enabled: {rng.choice(['true', 'false'])}\n  {rng.choice(['timeout', 'retries', 'workers'])}: {rng.randint(1, 100)}'''
+        
+        elif format_type == 'config':
+            return f'''# Configuration\n{rng.choice(self.nouns)}_{rng.choice(self.var_names)}={rng.randint(1000, 9999)}\n{rng.choice(['debug', 'verbose', 'strict'])}={rng.choice(['true', 'false'])}\n{rng.choice(['host', 'port', 'path'])}={rng.choice(['localhost', '0.0.0.0', '/tmp/data'])}\n{rng.choice(['timeout', 'retries', 'workers'])}={rng.randint(1, 100)}'''
+        
+        else:  # env
+            var1 = rng.choice(self.nouns).upper()
+            var2 = rng.choice(self.var_names).upper()
+            return f'''{var1}_HOST={rng.choice(['localhost', '127.0.0.1', '0.0.0.0'])}\n{var1}_PORT={rng.randint(3000, 9000)}\n{var2}_KEY={rng.choice(self.adjectives)}{rng.randint(1000, 9999)}\n{var2}_SECRET={rng.randint(10000000, 99999999)}\nENVIRONMENT={rng.choice(['development', 'staging', 'production'])}'''
+    
+    def get_content_for_file(self, filepath: str, max_size: int = MAX_FILE_SIZE) -> str:
+        """Get deterministic content for a file based on filepath and extension."""
+        # Get seeded RNG based on filepath
+        rng = self._get_seeded_random(filepath)
+        
+        ext = os.path.splitext(filepath)[1].lower() if filepath else ''
+        
+        # Choose content type based on extension
+        if ext in ['.py', '.js', '.ts', '.java', '.cpp', '.c', '.h', '.rs', '.go', '.sh']:
+            content = self._generate_code_content(rng)
+        elif ext in ['.json', '.yaml', '.yml', '.xml', '.toml', '.conf', '.cfg', '.config']:
+            content = self._generate_structured_content(rng)
+        else:
+            content = self._generate_text_content(rng)
+        
+        # Truncate to max_size if needed
+        if len(content) > max_size:
+            truncated = content[:max_size]
+            last_newline = truncated.rfind('\n')
+            if last_newline > max_size * 0.7:
+                content = truncated[:last_newline]
+            else:
+                content = truncated
+        
+        return content
+
+
+# Global generator instance
+_content_generator: Optional[DeterministicContentGenerator] = None
+
+
+def get_content_generator() -> DeterministicContentGenerator:
+    """Get or create the global content generator."""
+    global _content_generator
+    if _content_generator is None:
+        _content_generator = DeterministicContentGenerator()
+    return _content_generator
 
 # CORE FUSE operations we want to train on (filtering out noise)
-# Note: read/write operations excluded until explicitly implemented
+# Includes both state-changing and query operations for complete filesystem functionality
 USEFUL_FUSE_OPERATIONS = {
-    'getattr',    # Get file/directory attributes (stat-like)
-    'readdir',    # List directory contents
-    'mkdir',      # Create directory
-    'rmdir',      # Remove directory
-    'create',     # Create file
-    'unlink',     # Remove file
-    'chmod',      # Change permissions
-    'chown',      # Change ownership
-    'truncate',   # Change file size
-    'rename',     # Rename/move file
-    'symlink',    # Create symbolic link
-    'link',       # Create hard link
+    'getattr',    # Get file/directory attributes (stat-like) - QUERY
+    'readdir',    # List directory contents - QUERY  
+    'read',       # Read file contents - QUERY
+    'mkdir',      # Create directory - STATE CHANGE
+    'rmdir',      # Remove directory - STATE CHANGE
+    'create',     # Create file - STATE CHANGE
+    'write',      # Write to file - STATE CHANGE
+    'unlink',     # Remove file - STATE CHANGE
+    'chmod',      # Change permissions - STATE CHANGE
+    'chown',      # Change ownership - STATE CHANGE
+    'truncate',   # Change file size - STATE CHANGE
+    'rename',     # Rename/move file - STATE CHANGE
+    'symlink',    # Create symbolic link - STATE CHANGE
+    'link',       # Create hard link - STATE CHANGE
 }
 
 # Operations to EXCLUDE (too low-level or not useful for training)
@@ -73,33 +277,25 @@ EXCLUDED_FUSE_OPERATIONS = {
     'removexattr', # Remove extended attributes
 }
 
-# Balanced operation weights for random selection (more even distribution)
-# Note: write/read operations excluded until explicitly implemented
+# Balanced operation weights for random selection
+# Now includes read/write operations for complete filesystem functionality
 OPERATION_WEIGHTS = {
     'mkdir': 0.14,      # Directory creation
-    'touch': 0.14,      # File creation (create)
-    'rm': 0.14,         # File removal (unlink)
-    'rmdir': 0.14,      # Directory removal
-    'chmod': 0.12,      # Permission changes
-    'chown': 0.12,      # Ownership changes
-    'truncate': 0.08,   # Truncate file
-    'rename': 0.08,     # Rename/move file
-    'symlink': 0.06,    # Create symbolic link
+    'touch': 0.12,      # File creation (create)
+    'write': 0.12,      # Write to file
+    'read': 0.10,       # Read from file
+    'rm': 0.10,         # File removal (unlink)
+    'rmdir': 0.10,      # Directory removal
+    'chmod': 0.08,      # Permission changes
+    'chown': 0.08,      # Ownership changes
     'ls': 0.08,         # Directory listing (readdir)
     'stat': 0.06,       # File information (getattr)
+    'truncate': 0.06,   # Truncate file
+    'rename': 0.06,     # Rename/move file
+    'symlink': 0.06,    # Create symbolic link
 }
 
-# More realistic file content templates
-FILE_CONTENT_TEMPLATES = [
-    "#!/bin/bash\necho 'Hello World'\nexit 0",
-    "# Configuration file\nserver_port=8080\ndebug=true\nlog_level=info",
-    "import os\nimport sys\n\ndef main():\n    print('Python script')\n\nif __name__ == '__main__':\n    main()",
-    "Lorem ipsum dolor sit amet, consectetur adipiscing elit.",
-    "{\n  \"name\": \"example\",\n  \"version\": \"1.0.0\",\n  \"description\": \"Test file\"\n}",
-    "# README\n\nThis is a test file for filesystem operations.\n\n## Usage\n\nRun the commands as needed.",
-    "user:password:1000:1000:Test User:/home/user:/bin/bash",
-    "127.0.0.1 localhost\n192.168.1.1 gateway",
-]
+# Content templates are now generated dynamically based on file extensions
 
 def check_fuse_support() -> None:
     """
@@ -160,21 +356,10 @@ def generate_random_dirname() -> str:
     
     return f"{random.choice(names)}{suffix}{random.randint(1, 99) if random.random() < 0.5 else ''}"
 
-def generate_random_content() -> str:
-    """Generate more realistic file content."""
-    base_content = random.choice(FILE_CONTENT_TEMPLATES)
-    
-    # Sometimes add extra realistic content
-    if random.random() < 0.4:
-        extra_lines = []
-        for i in range(random.randint(1, 3)):
-            extra_lines.append(f"# Additional line {i+1}")
-            if random.random() < 0.5:
-                extra_lines.append(f"value_{i} = {random.randint(1, 100)}")
-        
-        return base_content + "\n" + "\n".join(extra_lines)
-    
-    return base_content
+def generate_deterministic_content(filepath: str) -> str:
+    """Generate deterministic content based on filepath hash."""
+    generator = get_content_generator()
+    return generator.get_content_for_file(filepath, max_size=MAX_FILE_SIZE)
 
 def get_random_existing_path(mount_dir: str) -> Optional[str]:
     """Get a random existing file or directory path."""
@@ -201,6 +386,205 @@ def get_random_existing_path(mount_dir: str) -> Optional[str]:
         pass
     
     return random.choice(all_paths) if all_paths else None
+
+
+def get_random_existing_file(mount_dir: str) -> Optional[str]:
+    """Get a random existing file path."""
+    files: list[str] = []
+    try:
+        for root, _, filenames in os.walk(mount_dir):
+            rel_root = os.path.relpath(root, mount_dir)
+            for name in filenames:
+                if name in {'llm', '.fuse_hidden'}:
+                    continue
+                rel_path = os.path.normpath(os.path.join(rel_root, name))
+                if rel_path == '.':
+                    continue
+                files.append(rel_path)
+    except (OSError, PermissionError):
+        pass
+    return random.choice(files) if files else None
+
+
+def get_random_file(
+    mount_dir: str,
+    min_size: Optional[int] = None,
+) -> Optional[Tuple[str, int]]:
+    """Return a random regular file and its size."""
+    files: list[Tuple[str, int]] = []
+    try:
+        for root, _, filenames in os.walk(mount_dir):
+            rel_root = os.path.relpath(root, mount_dir)
+            if rel_root == '.':
+                rel_root = ''
+            for name in filenames:
+                if name in {'llm', '.fuse_hidden'}:
+                    continue
+                rel_path = os.path.join(rel_root, name) if rel_root else name
+                abs_path = os.path.join(mount_dir, rel_path)
+                try:
+                    st = os.stat(abs_path)
+                except OSError:
+                    continue
+                if min_size is not None and st.st_size < min_size:
+                    continue
+                files.append((rel_path, st.st_size))
+    except (OSError, PermissionError):
+        pass
+    return random.choice(files) if files else None
+
+
+def get_random_directory(mount_dir: str, require_children: bool = False) -> Optional[str]:
+    """Select a random directory, optionally requiring at least one child entry."""
+    candidates: list[str] = []
+    try:
+        for root, dirs, files in os.walk(mount_dir):
+            # Skip special directories at the first level
+            dirs[:] = [d for d in dirs if d not in {'dev', 'proc', 'sys'}]
+
+            rel_root = os.path.relpath(root, mount_dir)
+            has_children = bool(dirs or files)
+            if require_children and not has_children:
+                continue
+            # Always allow root directory ('.')
+            candidates.append(rel_root)
+    except (OSError, PermissionError):
+        pass
+
+    return random.choice(candidates) if candidates else None
+
+
+def get_random_empty_directory(mount_dir: str) -> Optional[str]:
+    """Return a random empty directory suitable for rmdir operations."""
+    empties: list[str] = []
+    try:
+        for root, dirs, files in os.walk(mount_dir):
+            dirs[:] = [d for d in dirs if d not in {'dev', 'proc', 'sys'}]
+            rel_root = os.path.relpath(root, mount_dir)
+            if rel_root in ('.', ''):
+                continue
+            if not dirs and not files:
+                empties.append(rel_root)
+    except (OSError, PermissionError):
+        pass
+    return random.choice(empties) if empties else None
+
+
+def ensure_minimum_regular_files(mount_dir: str, min_files: int = 1) -> None:
+    """Ensure the filesystem contains at least `min_files` regular files with deterministic content."""
+    current_files = 0
+    try:
+        for _, _, filenames in os.walk(mount_dir):
+            current_files += len([f for f in filenames if f not in {'llm', '.fuse_hidden'}])
+            if current_files >= min_files:
+                return
+    except (OSError, PermissionError):
+        pass
+
+    files_needed = max(0, min_files - current_files)
+    for _ in range(files_needed):
+        for _ in range(10):
+            filename = generate_random_filename()
+            abs_path = os.path.join(mount_dir, filename)
+            if os.path.exists(abs_path):
+                continue
+            content = generate_deterministic_content(filename)
+            os.makedirs(os.path.dirname(abs_path), exist_ok=True)
+            with open(abs_path, 'w', encoding='utf-8') as fh:
+                fh.write(content)
+            break
+
+
+def ensure_directory_coverage(mount_dir: str, min_children: int = 2) -> None:
+    """
+    Ensure there is at least one empty directory and one populated directory.
+    This avoids generating readdir examples that list entries absent from the prompt.
+    """
+    empty_directory_present = False
+    populated_directory_present = False
+    try:
+        for root, dirs, files in os.walk(mount_dir):
+            dirs[:] = [d for d in dirs if d not in {'dev', 'proc', 'sys'}]
+            rel_root = os.path.relpath(root, mount_dir)
+            if rel_root == '.':
+                rel_root = ''
+
+            has_children = bool(dirs or files)
+            if rel_root:
+                if has_children:
+                    populated_directory_present = True
+                else:
+                    empty_directory_present = True
+
+            if empty_directory_present and populated_directory_present:
+                return
+    except (OSError, PermissionError):
+        pass
+
+    if not empty_directory_present:
+        for _ in range(10):
+            dirname = generate_random_dirname()
+            abs_dir = os.path.join(mount_dir, dirname)
+            if os.path.exists(abs_dir):
+                continue
+            os.makedirs(abs_dir, exist_ok=True)
+            empty_directory_present = True
+            break
+
+    if not populated_directory_present:
+        for _ in range(10):
+            parent = generate_random_dirname()
+            abs_dir = os.path.join(mount_dir, parent)
+            if os.path.exists(abs_dir):
+                continue
+            os.makedirs(abs_dir, exist_ok=True)
+            child_count = max(1, min_children)
+            for _ in range(child_count):
+                child_name = generate_random_filename()
+                rel_child = os.path.join(parent, child_name)
+                child_path = os.path.join(mount_dir, rel_child)
+                content = generate_deterministic_content(rel_child)
+                with open(child_path, 'w', encoding='utf-8') as fh:
+                    fh.write(content)
+            populated_directory_present = True
+            break
+
+
+def render_state_with_focus(
+    fs_state: FSState,
+    focus_paths: Optional[List[str]] = None,
+) -> str:
+    """Render the filesystem as XML ensuring full contents for focus paths."""
+    normalized_paths = set()
+    for path in focus_paths or []:
+        if not path:
+            continue
+        normalized_paths.add(path.strip(os.sep))
+
+    xml_str = fs_state.to_xml_string(
+        include_contents=True,
+        max_file_size=MAX_FILE_SIZE_CHARS,
+        full_content_paths=normalized_paths,
+    )
+    return sanitize_text_block(xml_str)
+
+
+def reset_mount_directory(mount_dir: str) -> None:
+    """Remove all entries inside the mounted filesystem (except special dirs)."""
+    try:
+        for entry in os.scandir(mount_dir):
+            if entry.name in {'dev', 'proc', 'sys'}:
+                continue
+            try:
+                if entry.is_dir(follow_symlinks=False):
+                    shutil.rmtree(entry.path, ignore_errors=True)
+                else:
+                    os.unlink(entry.path)
+            except Exception:
+                # Ignore cleanup errors; subsequent operations can still proceed
+                pass
+    except (FileNotFoundError, PermissionError):
+        pass
 
 def generate_random_operation(mount_dir: str) -> Tuple[str, str]:
     """
@@ -289,11 +673,9 @@ def generate_random_operation(mount_dir: str) -> Tuple[str, str]:
                 # Truncate to random size (0 to 100 bytes)
                 size = random.randint(0, 100)
                 return 'truncate', f'truncate -s {size} {shlex.quote(existing_path)}'
-            # Fallback to creating and truncating a file
-            filename = generate_random_filename()
-            content = generate_random_content()
-            size = random.randint(0, 50)
-            return 'truncate', f'echo {shlex.quote(content)} > {shlex.quote(filename)} && truncate -s {size} {shlex.quote(filename)}'
+            # Fallback: ONLY truncate existing files
+            # If no files exist, try mkdir instead
+            return 'mkdir', f'mkdir -p {shlex.quote(generate_random_dirname())}'
             
         case 'rename':
             existing_path = get_random_existing_path(mount_dir)
@@ -304,27 +686,29 @@ def generate_random_operation(mount_dir: str) -> Tuple[str, str]:
                 else:
                     new_name = generate_random_dirname()
                 return 'rename', f'mv {shlex.quote(existing_path)} {shlex.quote(new_name)}'
-            # Fallback to creating and renaming a file
-            old_name = generate_random_filename()
-            new_name = generate_random_filename()
-            return 'rename', f'touch {shlex.quote(old_name)} && mv {shlex.quote(old_name)} {shlex.quote(new_name)}'
+            # Fallback: ONLY rename existing files
+            # If no files exist, try touch instead
+            filename = generate_random_filename()
+            return 'touch', f'touch {shlex.quote(filename)}'
             
         case 'symlink':
             existing_path = get_random_existing_path(mount_dir)
             if existing_path:
                 link_name = f"link_to_{generate_random_filename()}"
                 return 'symlink', f'ln -s {shlex.quote(existing_path)} {shlex.quote(link_name)}'
-            # Fallback to creating a file and linking to it
-            target = generate_random_filename()
-            link_name = f"link_to_{target}"
-            return 'symlink', f'touch {shlex.quote(target)} && ln -s {shlex.quote(target)} {shlex.quote(link_name)}'
+            # Fallback: ONLY symlink to existing files
+            # If no files exist, try mkdir instead
+            dirname = generate_random_dirname()
+            return 'mkdir', f'mkdir -p {shlex.quote(dirname)}'
             
         case 'ls':
-            # Sometimes ls a specific directory, sometimes root
-            if random.random() < 0.5:
-                existing_path = get_random_existing_path(mount_dir)
-                if existing_path and os.path.isdir(os.path.join(mount_dir, existing_path)):
-                    return 'ls', f'ls -la {shlex.quote(existing_path)}'
+            # Prefer directories that already contain entries to reinforce correct listings
+            existing_dir = get_random_directory(mount_dir, require_children=True)
+            if existing_dir is None and random.random() < 0.5:
+                existing_dir = get_random_directory(mount_dir, require_children=False)
+
+            if existing_dir and existing_dir != '.':
+                return 'ls', f'ls -la {shlex.quote(existing_dir)}'
             return 'ls', 'ls -la .'
             
         case 'stat':
@@ -333,11 +717,188 @@ def generate_random_operation(mount_dir: str) -> Tuple[str, str]:
                 return 'stat', f'stat {shlex.quote(existing_path)}'
             # Fallback to stat root
             return 'stat', 'stat .'
+        
+        case 'write':
+            existing_path = get_random_existing_path(mount_dir)
+            if existing_path and os.path.isfile(os.path.join(mount_dir, existing_path)):
+                # Write to existing file with deterministic content
+                content = generate_deterministic_content(existing_path)
+                return 'write', f'echo {shlex.quote(content)} > {shlex.quote(existing_path)}'
+            else:
+                # Create new file and write to it with deterministic content
+                filename = generate_random_filename()
+                content = generate_deterministic_content(filename)
+                return 'write', f'echo {shlex.quote(content)} > {shlex.quote(filename)}'
+        
+        case 'read':
+            existing_file = get_random_existing_file(mount_dir)
+            if existing_file and os.path.isfile(os.path.join(mount_dir, existing_file)):
+                return 'read', f'cat {shlex.quote(existing_file)}'
+            raise OperationSelectionError("No readable file available in current state")
             
         case _:
             # Default fallback
             return 'touch', f'touch {generate_random_filename()}'
 
+
+def generate_targeted_operation(mount_dir: str) -> Tuple[str, str, Optional[List[str]]]:
+    """
+    Generate a targeted operation to reinforce known failure modes.
+
+    Scenarios:
+      - empty root readdir → expects [".", ".."]
+      - empty subdir readdir → expects [".", ".."]
+      - populated root/subdir readdir → ensure entries are preserved
+      - nested mkdir chain → deep path creation
+      - rename/symlink simple text file → no binary/NUL content
+      - write deterministic text log (avoid NULs)
+      - read immediately after deterministic write
+
+    Returns:
+      Tuple (operation_label, shell_command)
+    """
+    import random, shlex
+
+    scenario = random.choice([
+        'nested_mkdir',
+        'truncate_existing',
+        'overwrite_existing',
+        'unlink_existing',
+        'rmdir_empty',
+        'symlink_existing',
+        'write_text_log',
+        'write_then_read',
+    ])
+
+    match scenario:
+        case 'nested_mkdir':
+            # Deeply nested directory creation
+            parts = [generate_random_dirname(), generate_random_dirname(), generate_random_dirname()]
+            path = "/".join(parts)
+            return 'mkdir', f"mkdir -p {shlex.quote(path)}", None
+
+        case 'truncate_existing':
+            candidate = get_random_file(mount_dir, min_size=16)
+            if not candidate:
+                return generate_random_operation(mount_dir)
+            rel_path, size = candidate
+            new_size = random.randint(0, max(1, size - 1))
+            script = (
+                "python3 - <<'PY'\n"
+                "import os\n"
+                f"path = {repr(rel_path)}\n"
+                f"os.truncate(path, {new_size})\n"
+                "PY"
+            )
+            return 'truncate', script, [rel_path]
+
+        case 'overwrite_existing':
+            candidate = get_random_file(mount_dir)
+            if not candidate:
+                return generate_random_operation(mount_dir)
+            rel_path, _ = candidate
+            overwrite_content = generate_deterministic_content(rel_path + ':overwrite')
+            script = (
+                "python3 - <<'PY'\n"
+                "from pathlib import Path\n"
+                f"path = Path({repr(rel_path)})\n"
+                "path.parent.mkdir(parents=True, exist_ok=True)\n"
+                f"path.write_text({repr(overwrite_content)}, encoding='utf-8')\n"
+                "PY"
+            )
+            return 'write', script, [rel_path]
+
+        case 'unlink_existing':
+            candidate = get_random_file(mount_dir)
+            if not candidate:
+                return generate_random_operation(mount_dir)
+            rel_path, _ = candidate
+            return 'unlink', f"rm -f {shlex.quote(rel_path)}", [rel_path]
+
+        case 'rmdir_empty':
+            empty_dir = get_random_empty_directory(mount_dir)
+            if not empty_dir:
+                return generate_random_operation(mount_dir)
+            return 'rmdir', f"rmdir {shlex.quote(empty_dir)}", [empty_dir]
+
+        case 'symlink_existing':
+            candidate = get_random_file(mount_dir)
+            if not candidate:
+                return generate_random_operation(mount_dir)
+            rel_path, _ = candidate
+            link_name = f"{rel_path}_link"
+            script = (
+                "python3 - <<'PY'\n"
+                "from pathlib import Path\n"
+                f"target = Path({repr(rel_path)})\n"
+                f"link = Path({repr(link_name)})\n"
+                "link.parent.mkdir(parents=True, exist_ok=True)\n"
+                "if link.exists() or link.is_symlink():\n"
+                "    link.unlink()\n"
+                "link.symlink_to(target)\n"
+                "PY"
+            )
+            return 'symlink', script, [rel_path]
+
+        case 'write_text_log':
+            fname = generate_random_filename()
+            # Deterministic, printable log content (no NULs)
+            text = "[INFO] init\n[DEBUG] step1\n[INFO] done"
+            cmd = f"printf %s {shlex.quote(text)} > {shlex.quote(fname)}"
+            return 'write', cmd, None
+
+        case 'write_then_read':
+            fname = generate_random_filename()
+            content = generate_deterministic_content(fname)
+            writer = (
+                "python3 - <<'PY'\n"
+                "from pathlib import Path\n"
+                f"Path({repr(fname)}).write_text({repr(content)}, encoding='utf-8')\n"
+                "PY"
+            )
+            cmd = f"{writer}\ncat {shlex.quote(fname)}"
+            return 'read', cmd, None
+
+        case _:
+            return (*generate_random_operation(mount_dir), None)
+
+
+def generate_sparse_operation(mount_dir: str) -> Tuple[str, str]:
+    """
+    Generate an operation on an almost-empty filesystem to simulate legacy prompts.
+    Only uses operations that succeed without pre-existing files.
+    """
+    import random, shlex
+
+    choice = random.choice(['mkdir', 'create', 'write', 'truncate', 'readdir'])
+
+    if choice == 'mkdir':
+        path = generate_random_dirname()
+        return 'mkdir', f"mkdir -p {shlex.quote(path)}"
+
+    if choice == 'create':
+        fname = generate_random_filename()
+        return 'create', f"touch {shlex.quote(fname)}"
+
+    if choice == 'write':
+        fname = generate_random_filename()
+        content = generate_deterministic_content(fname)
+        writer = (
+            "python3 - <<'PY'\n"
+            "from pathlib import Path\n"
+            f"Path({repr(fname)}).write_text({repr(content)}, encoding='utf-8')\n"
+            "PY"
+        )
+        return 'write', writer
+
+    if choice == 'truncate':
+        fname = generate_random_filename()
+        size = random.randint(0, 64)
+        # truncate -s <size> creates the file if it does not exist
+        return 'truncate', f"truncate -s {size} {shlex.quote(fname)}"
+
+    # Default to readdir on root
+    return 'ls', 'ls -la .'
 def execute_command(command: str, mount_dir: str) -> Tuple[bool, str]:
     """
     Execute a shell command in the given directory.
@@ -364,6 +925,130 @@ def execute_command(command: str, mount_dir: str) -> Tuple[bool, str]:
     except Exception as e:
         return False, str(e)
 
+
+def generate_example_in_session(mount_dir: str, log_file: str, targeted_prob: float) -> Dict[str, Any]:
+    """Generate a single training example using an existing FUSE session."""
+    reset_mount_directory(mount_dir)
+
+    with open(log_file, 'w'):
+        pass
+
+    force_sparse_prompt = random.random() < SPARSE_PROMPT_PROB
+
+    if not force_sparse_prompt:
+        num_setup_ops = random.choices([0, 1, 2, 3], weights=[20, 30, 30, 20])[0]
+        for _ in range(num_setup_ops):
+            try:
+                _, setup_command = generate_random_operation(mount_dir)
+            except OperationSelectionError:
+                continue
+            execute_command(setup_command, mount_dir)
+
+        if random.random() < 0.5:
+            filename = generate_random_filename()
+            content = generate_deterministic_content(filename)
+            file_path = os.path.join(mount_dir, filename)
+            try:
+                with open(file_path, 'w') as f:
+                    f.write(content)
+            except Exception:
+                pass
+
+        ensure_minimum_regular_files(mount_dir, min_files=1)
+        ensure_directory_coverage(mount_dir, min_children=2)
+
+    fs_state = FSState(mount_dir)
+    fs_state.sync_from_fs()
+    focus_paths: Optional[List[str]] = None
+
+    with open(log_file, 'w'):
+        pass
+
+    try:
+        if force_sparse_prompt:
+            op_result = generate_sparse_operation(mount_dir)
+            operation_type, shell_command = op_result[:2]
+            focus_paths = op_result[2] if len(op_result) > 2 else None
+        else:
+            use_targeted = random.random() < max(0.0, min(1.0, targeted_prob))
+            if use_targeted:
+                op_result = generate_targeted_operation(mount_dir)
+            else:
+                op_result = generate_random_operation(mount_dir)
+            operation_type, shell_command = op_result[:2]
+            focus_paths = op_result[2] if len(op_result) > 2 else None
+    except OperationSelectionError:
+        return None
+
+    initial_state = render_state_with_focus(fs_state, focus_paths)
+    if len(initial_state) // 4 > MAX_PROMPT_TOKENS:
+        return None
+
+    success, output = execute_command(shell_command, mount_dir)
+    if not success:
+        return None
+
+    time.sleep(0.01)
+    logged_operations = read_operation_log(log_file)
+
+    fuse_operation = None
+    if logged_operations:
+        main_ops = [op for op in logged_operations if op['operation'] not in ['getattr', 'open']]
+        fuse_operation = main_ops[-1] if main_ops else logged_operations[-1]
+    if fuse_operation is None:
+        return None
+
+    fs_state.sync_from_fs()
+
+    query_operations = {'readdir', 'getattr', 'read'}
+
+    if fuse_operation:
+        actual_operation = fuse_operation['operation']
+    elif operation_type in ['ls']:
+        actual_operation = 'readdir'
+    elif operation_type in ['stat']:
+        actual_operation = 'getattr'
+    else:
+        actual_operation = operation_type
+
+    operation_str = shell_command
+    if fuse_operation:
+        params = fuse_operation.get('parameters', {})
+        if params:
+            param_str = ", ".join(f"{key}={value}" for key, value in params.items())
+            operation_str = f"{fuse_operation['operation']}('{fuse_operation['path']}', {param_str})"
+        else:
+            operation_str = f"{fuse_operation['operation']}('{fuse_operation['path']}')"
+
+    if actual_operation == 'read' and fuse_operation:
+        # Ensure the prompt contains the full body of the file being read.
+        read_path = fuse_operation.get('path', '/')
+        clean_path = read_path.strip('/')
+        full_content_paths = {clean_path} if clean_path else {''}
+        initial_state = render_state_with_focus(fs_state, list(full_content_paths))
+
+    if actual_operation in query_operations:
+        result = generate_query_response(actual_operation, fuse_operation, output, success, fs_state)
+        op_type = "query"
+    else:
+        result = render_state_with_focus(fs_state, focus_paths)
+        op_type = "state_change"
+
+    total_content = initial_state + operation_str + result
+    final_tokens = len(total_content) // 4
+    if final_tokens > MAX_PROMPT_TOKENS:
+        return None
+
+    return {
+        'initial_state': initial_state,
+        'operation': operation_str,
+        'result': result,
+        'operation_type': op_type,
+        'shell_command': shell_command,
+        'fuse_operations': logged_operations
+    }
+
+
 def start_fuse_filesystem(mount_dir: str, log_file: str) -> subprocess.Popen:
     """
     Start the reference FUSE filesystem in a subprocess.
@@ -375,7 +1060,6 @@ def start_fuse_filesystem(mount_dir: str, log_file: str) -> subprocess.Popen:
     Returns:
         Subprocess handle for the FUSE filesystem
     """
-    # Import here to avoid circular imports
     import sys
     python_path = sys.executable
     
@@ -384,13 +1068,13 @@ def start_fuse_filesystem(mount_dir: str, log_file: str) -> subprocess.Popen:
     os.makedirs(root_dir, exist_ok=True)
     
     # Start the reference FUSE filesystem with loopback to root_dir
-    cmd = [python_path, '-m', 'src.reference_fuse', mount_dir, root_dir, log_file]
+    cmd = [python_path, '-m', 'train.reference_fuse', mount_dir, root_dir, log_file]
     
     process = subprocess.Popen(
         cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        text=False
     )
     
     # Wait for filesystem to mount
@@ -434,6 +1118,110 @@ def stop_fuse_filesystem(mount_dir: str, process: subprocess.Popen) -> None:
         process.kill()
         process.wait()
 
+
+def generate_query_response(operation: str, fuse_operation: Optional[Dict[str, Any]], 
+                           shell_output: str, success: bool, fs_state: FSState) -> str:
+    """
+    Generate appropriate response for query operations.
+    
+    This teaches the LLM to return specific query responses rather than complete filesystem trees.
+    
+    Args:
+        operation: Operation type ('readdir', 'getattr', 'read')
+        fuse_operation: FUSE operation details from log  
+        shell_output: Shell command output
+        success: Whether the operation succeeded
+        fs_state: Current filesystem state
+        
+    Returns:
+        Formatted query response appropriate for the operation type
+    """
+    if not success:
+        return f"ERROR: {shell_output}"
+    
+    path = fuse_operation.get('path', '/') if fuse_operation else '/'
+    
+    if operation == 'readdir':
+        # Return directory contents as a list
+        try:
+            # Extract directory entries from filesystem state
+            entries = ['.', '..']  # Always include parent references
+            
+            # Get relative path for state lookup
+            clean_path = path.strip('/')
+            if not clean_path:
+                # Root directory - get top-level entries
+                for file_path, entry in fs_state.state.items():
+                    if '/' not in file_path and file_path:
+                        entries.append(entry.name)
+            else:
+                # Subdirectory - get entries under this path
+                prefix = clean_path + '/'
+                for file_path, entry in fs_state.state.items():
+                    if file_path.startswith(prefix):
+                        relative = file_path[len(prefix):]
+                        if '/' not in relative:  # Direct child only
+                            entries.append(entry.name)
+            
+            # Return as JSON list for consistency
+            entries = normalize_readdir_entries(entries)
+            return json.dumps(entries, separators=(',', ':'))
+            
+        except Exception as e:
+            return f"ERROR: Failed to read directory {path}: {e}"
+    
+    elif operation == 'getattr':
+        # Return file/directory attributes
+        try:
+            clean_path = path.strip('/')
+            if clean_path in fs_state.state:
+                entry = fs_state.state[clean_path]
+                attrs = {
+                    'mode': entry.mode,
+                    'size': entry.size,
+                    'type': 'directory' if entry.is_dir else 'file',
+                    'mtime': entry.mtime,
+                    'owner': entry.owner,
+                    'group': entry.group
+                }
+                return json.dumps(attrs)
+            else:
+                return "ERROR: No such file or directory"
+                
+        except Exception as e:
+            return f"ERROR: Failed to get attributes for {path}: {e}"
+    
+    elif operation == 'read':
+        # Return file contents
+        try:
+            clean_path = path.strip('/')
+            if clean_path in fs_state.state:
+                entry = fs_state.state[clean_path]
+                if entry.is_dir:
+                    return "ERROR: Is a directory"
+                
+                # Read actual file content from filesystem
+                if fs_state.root_path:
+                    full_path = os.path.join(fs_state.root_path, clean_path) if clean_path else fs_state.root_path
+                    try:
+                        with open(full_path, 'r', encoding='utf-8') as f:
+                            content = f.read()
+                        return sanitize_read_response(content)
+                    except (UnicodeDecodeError, IOError) as e:
+                        return f"ERROR: Cannot read file {path}: {e}"
+                else:
+                    return "ERROR: No filesystem root available"
+            else:
+                return "ERROR: No such file or directory"
+                
+        except Exception as e:
+            return f"ERROR: Failed to read file {path}: {e}"
+    
+    else:
+        # Fallback for unknown query operations
+        return sanitize_read_response(shell_output)
+
+
 def filter_fuse_operations(operations: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
     Filter FUSE operations to only include useful ones for training.
@@ -469,260 +1257,58 @@ def read_operation_log(log_file: str) -> List[Dict[str, Any]]:
         List of filtered operation log entries
     """
     operations = []
-    try:
-        with open(log_file, 'r') as f:
-            for line in f:
-                line = line.strip()
-                if line:
-                    try:
-                        operations.append(json.loads(line))
-                    except json.JSONDecodeError:
-                        continue
-    except FileNotFoundError:
-        pass
+    
+    # Early return for missing log file
+    if not os.path.exists(log_file):
+        return filter_fuse_operations([])
+    
+    # Parse log file
+    with open(log_file, 'r') as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            
+            try:
+                operations.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
     
     # Filter to only useful operations
     return filter_fuse_operations(operations)
 
-def generate_one(_worker_id: Optional[int] = None) -> Dict[str, Any]:
+def generate_one(_worker_id: Optional[int] = None, targeted_prob: float = DEFAULT_TARGETED_PROB) -> Dict[str, Any]:
     """
-    Generate a single training example using FUSE operations.
-    
-    Creates a temporary mount point, starts a reference FUSE filesystem,
-    performs random operations, and captures the FUSE operation calls
-    for training data.
-    
-    Args:
-        _worker_id: Worker ID for multiprocessing (ignored, for compatibility)
-        
-    Returns:
-        Dictionary containing the training example with keys:
-        - 'initial_state': Tree representation of initial filesystem state
-        - 'operation': The FUSE operation that was called
-        - 'result': Either new state tree or operation result
-        - 'operation_type': Type of operation (state-changing vs query)
+    Backward-compatible wrapper that generates a single example with its own FUSE mount.
     """
     with tempfile.TemporaryDirectory() as temp_base:
         mount_dir = os.path.join(temp_base, 'mount')
         log_file = os.path.join(temp_base, 'operations.log')
-        
-        os.makedirs(mount_dir)
-        
-        # Start FUSE filesystem
+
+        os.makedirs(mount_dir, exist_ok=True)
         fuse_process = start_fuse_filesystem(mount_dir, log_file)
-        
+
         try:
-            # Clear the log file
-            with open(log_file, 'w') as f:
-                pass
-            
-            # Perform minimal setup operations (reduced for speed)
-            num_setup_ops = random.randint(1, 3)  # Reduced from 2-8 to 1-3
-            for _ in range(num_setup_ops):
-                _, setup_command = generate_random_operation(mount_dir)
-                execute_command(setup_command, mount_dir)
-            
-            # Create minimal files with content (reduced for speed)
-            if random.random() < 0.5:  # Only 50% chance to create extra files
-                filename = generate_random_filename()
-                content = generate_random_content()
-                file_path = os.path.join(mount_dir, filename)
-                try:
-                    with open(file_path, 'w') as f:
-                        f.write(content)
-                except Exception:
-                    pass
-            
-            # Capture initial state
-            fs_state = FSState(mount_dir)
-            fs_state.sync_from_fs()
-            initial_state = fs_state.to_tree_string()
-            
-            # Clear log before the operation we want to capture
-            with open(log_file, 'w') as f:
-                pass
-            
-            # Generate and execute the operation we want to learn
-            operation_type, shell_command = generate_random_operation(mount_dir)
-            success, output = execute_command(shell_command, mount_dir)
-            
-            # Read the FUSE operations that were logged
-            # Small delay to ensure log is written (reduced from 0.1s)
-            time.sleep(0.01)  # 10ms should be sufficient
-            logged_operations = read_operation_log(log_file)
-            
-            # Find the most relevant FUSE operation
-            fuse_operation = None
-            if logged_operations:
-                # Filter out getattr calls and focus on the main operation
-                main_ops = [op for op in logged_operations 
-                           if op['operation'] not in ['getattr', 'open']]
-                if main_ops:
-                    fuse_operation = main_ops[-1]  # Take the last main operation
-                else:
-                    fuse_operation = logged_operations[-1]  # Fallback to last operation
-            
-            # Determine result based on operation type
-            if operation_type in ['ls', 'stat']:
-                # Query operations: return the command output
-                result = output if success else f"Error: {output}"
-                op_type = "query"
-            else:
-                # State-changing operations: return the new filesystem state
-                fs_state.sync_from_fs()
-                result = fs_state.to_tree_string()
-                op_type = "state_change"
-            
-            # Use FUSE operation if available, otherwise fall back to shell command
-            if fuse_operation:
-                params = fuse_operation.get('parameters', {})
-                param_str = ""
-                if params:
-                    param_parts = []
-                    for key, value in params.items():
-                        param_parts.append(f"{key}={value}")
-                    param_str = ", " + ", ".join(param_parts)
-                
-                # Use consistent format without "FUSE" prefix
-                operation_str = f"{fuse_operation['operation']}('{fuse_operation['path']}'{param_str})"
-            else:
-                operation_str = shell_command
-            
-            return {
-                'initial_state': initial_state,
-                'operation': operation_str,
-                'result': result,
-                'operation_type': op_type,
-                'shell_command': shell_command,  # Keep for debugging
-                'fuse_operations': logged_operations  # Keep for debugging
-            }
-            
+            example = None
+            attempts = 0
+            while example is None and attempts < 10:
+                example = generate_example_in_session(mount_dir, log_file, targeted_prob)
+                attempts += 1
+            if example is None:
+                raise RuntimeError("Failed to generate example after multiple retries")
+            return example
         finally:
-            # Always clean up the FUSE filesystem
             stop_fuse_filesystem(mount_dir, fuse_process)
 
-def generate_batch(batch_size: int) -> List[Dict[str, Any]]:
-    """
-    Generate a batch of examples using a single FUSE mount (performance optimization).
-    
-    Args:
-        batch_size: Number of examples to generate in this batch
-        
-    Returns:
-        List of generated training examples
-    """
-    examples = []
-    
-    with tempfile.TemporaryDirectory() as temp_base:
-        mount_dir = os.path.join(temp_base, 'mount')
-        log_file = os.path.join(temp_base, 'operations.log')
-        
-        os.makedirs(mount_dir)
-        
-        # Start FUSE filesystem once for the entire batch
-        fuse_process = start_fuse_filesystem(mount_dir, log_file)
-        
-        try:
-            for i in range(batch_size):
-                # Clear the log file
-                with open(log_file, 'w') as f:
-                    pass
-                
-                # Perform minimal setup operations (reduced for speed)
-                num_setup_ops = random.randint(1, 3)  # Reduced from 2-8 to 1-3
-                for _ in range(num_setup_ops):
-                    _, setup_command = generate_random_operation(mount_dir)
-                    execute_command(setup_command, mount_dir)
-                
-                # Create minimal files with content (reduced for speed)
-                if random.random() < 0.5:  # Only 50% chance to create extra files
-                    filename = generate_random_filename()
-                    content = generate_random_content()
-                    file_path = os.path.join(mount_dir, filename)
-                    try:
-                        with open(file_path, 'w') as f:
-                            f.write(content)
-                    except Exception:
-                        pass
-                
-                # Capture initial state
-                fs_state = FSState(mount_dir)
-                fs_state.sync_from_fs()
-                initial_state = fs_state.to_tree_string()
-                
-                # Clear log before the operation we want to capture
-                with open(log_file, 'w') as f:
-                    pass
-                
-                # Generate and execute the operation we want to learn
-                operation_type, shell_command = generate_random_operation(mount_dir)
-                success, output = execute_command(shell_command, mount_dir)
-                
-                # Read the FUSE operations that were logged
-                # Small delay to ensure log is written (reduced from 0.1s)
-                time.sleep(0.01)  # 10ms should be sufficient
-                logged_operations = read_operation_log(log_file)
-                
-                # Find the most relevant FUSE operation
-                fuse_operation = None
-                if logged_operations:
-                    # Filter out getattr calls and focus on the main operation
-                    main_ops = [op for op in logged_operations 
-                               if op['operation'] not in ['getattr', 'open']]
-                    if main_ops:
-                        fuse_operation = main_ops[-1]  # Take the last main operation
-                    else:
-                        fuse_operation = logged_operations[-1]  # Fallback to last operation
-                
-                # Determine result based on operation type
-                if operation_type in ['ls', 'stat']:
-                    # Query operations: return the command output
-                    result = output if success else f"Error: {output}"
-                    op_type = "query"
-                else:
-                    # State-changing operations: return the new filesystem state
-                    fs_state.sync_from_fs()
-                    result = fs_state.to_tree_string()
-                    op_type = "state_change"
-                
-                # Use FUSE operation if available, otherwise fall back to shell command
-                if fuse_operation:
-                    params = fuse_operation.get('parameters', {})
-                    param_str = ""
-                    if params:
-                        param_parts = []
-                        for key, value in params.items():
-                            param_parts.append(f"{key}={value}")
-                        param_str = ", " + ", ".join(param_parts)
-                    
-                    # Use consistent format without "FUSE" prefix
-                    operation_str = f"{fuse_operation['operation']}('{fuse_operation['path']}'{param_str})"
-                else:
-                    operation_str = shell_command
-                
-                examples.append({
-                    'initial_state': initial_state,
-                    'operation': operation_str,
-                    'result': result,
-                    'operation_type': op_type,
-                    'shell_command': shell_command,  # Keep for debugging
-                    'fuse_operations': logged_operations  # Keep for debugging
-                })
-                
-        finally:
-            # Always clean up the FUSE filesystem
-            stop_fuse_filesystem(mount_dir, fuse_process)
-    
-    return examples
-
-def generate_data(num_examples: int = DEFAULT_NUM_EXAMPLES, output_file: Optional[str] = None, hf_format: bool = False) -> List[Dict[str, Any]]:
+def generate_data(num_examples: int = DEFAULT_NUM_EXAMPLES, output_dir: Optional[str] = None, targeted_prob: float = DEFAULT_TARGETED_PROB) -> List[Dict[str, Any]]:
     """
     Generate training data using FUSE operations with operation filtering.
     
+    Always saves in HuggingFace JSONL format with deterministic naming.
+    
     Args:
         num_examples: Number of training examples to generate
-        output_file: Path to output file (if None, returns data without saving)
-        hf_format: If True, save in HuggingFace JSONL format; if False, save structured JSON
+        output_dir: Directory to save output file (if None, returns data without saving)
         
     Returns:
         List of generated training examples (always in structured format)
@@ -731,56 +1317,74 @@ def generate_data(num_examples: int = DEFAULT_NUM_EXAMPLES, output_file: Optiona
     print(f"📋 Filtering to useful operations: {', '.join(sorted(USEFUL_FUSE_OPERATIONS))}")
     print(f"🚫 Excluding noisy operations: {', '.join(sorted(EXCLUDED_FUSE_OPERATIONS))}")
     
-    # Use batched generation to reuse FUSE mounts (major performance improvement)
-    BATCH_SIZE = 20  # Generate 20 examples per FUSE mount
     examples = []
     operation_counts = {}
-    
-    for batch_start in range(0, num_examples, BATCH_SIZE):
-        batch_end = min(batch_start + BATCH_SIZE, num_examples)
-        batch_size = batch_end - batch_start
-        
-        print(f"📝 Generating batch {batch_start//BATCH_SIZE + 1}/{(num_examples + BATCH_SIZE - 1)//BATCH_SIZE} ({batch_start}-{batch_end-1})...")
-        
+
+    print(f"📝 Generating {num_examples} examples within a shared FUSE session...")
+
+    with tempfile.TemporaryDirectory() as temp_base:
+        mount_dir = os.path.join(temp_base, 'mount')
+        log_file = os.path.join(temp_base, 'operations.log')
+
+        os.makedirs(mount_dir, exist_ok=True)
+        fuse_process = start_fuse_filesystem(mount_dir, log_file)
+
         try:
-            batch_examples = generate_batch(batch_size)
-            examples.extend(batch_examples)
-            
-            # Track operation distribution from the actual operation string
-            for example in batch_examples:
-                operation_str = example.get('operation', '')
-                if '(' in operation_str:
-                    op_name = operation_str.split('(')[0]
-                    operation_counts[op_name] = operation_counts.get(op_name, 0) + 1
-                else:
-                    operation_counts['shell_command'] = operation_counts.get('shell_command', 0) + 1
-                
-        except Exception as e:
-            print(f"❌ Failed to generate batch {batch_start//BATCH_SIZE + 1}: {e}")
-            # Don't continue if FUSE operations are failing
-            raise
+            while len(examples) < num_examples:
+                try:
+                    example = None
+                    attempts = 0
+                    while example is None and attempts < 10:
+                        example = generate_example_in_session(mount_dir, log_file, targeted_prob)
+                        attempts += 1
+                    if example is None:
+                        raise RuntimeError("Failed to generate example after multiple retries")
+
+                    examples.append(example)
+
+                    operation_str = example.get('operation', '')
+                    if '(' in operation_str:
+                        op_name = operation_str.split('(')[0]
+                        operation_counts[op_name] = operation_counts.get(op_name, 0) + 1
+                    else:
+                        operation_counts['shell_command'] = operation_counts.get('shell_command', 0) + 1
+
+                    print(f"  ✅ Generated example {len(examples)}/{num_examples}")
+                except Exception as e:
+                    print(f"❌ Failed to generate example {len(examples)+1}: {e}")
+        finally:
+            stop_fuse_filesystem(mount_dir, fuse_process)
     
     print(f"\n📊 Operation Distribution:")
     for op, count in sorted(operation_counts.items()):
         status = "✅" if op in USEFUL_FUSE_OPERATIONS else "🚫" if op in EXCLUDED_FUSE_OPERATIONS else "❓"
         print(f"  {status} {op}: {count}")
     
-    if output_file:
+    if output_dir:
+        # Create output directory and generate deterministic filename
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+        
+        # Generate deterministic filename: fuse_{num_samples}_{unixtime}.jsonl
+        unix_time = int(time.time())
+        filename = f"fuse_{num_examples}_{unix_time}.jsonl"
+        output_file = output_path / filename
+        
         print(f"\n💾 Writing {len(examples)} examples to {output_file}")
-        if hf_format:
-            print("📄 Using HuggingFace JSONL format")
-            save_hf_format(examples, output_file)
-        else:
-            print("📄 Using structured JSON format")
-            with open(output_file, 'w') as f:
-                json.dump(examples, f, indent=2)
+        print("📄 Using HuggingFace JSONL format")
+        save_hf_format(examples, str(output_file))
         print("✅ Data generation complete!")
+        print(f"📄 Output saved to: {output_file}")
     
     return examples
 
 def convert_to_hf_format(examples: List[Dict[str, Any]]) -> List[Dict[str, str]]:
     """
     Convert structured training examples to HuggingFace format.
+    
+    Implements SMART DUAL TRAINING format:
+    - STATE-CHANGING: (State T, operation) → State T+1
+    - QUERY: (State T, query) → Specific response
     
     Args:
         examples: List of structured training examples
@@ -791,44 +1395,18 @@ def convert_to_hf_format(examples: List[Dict[str, Any]]) -> List[Dict[str, str]]
     hf_examples = []
     
     for example in examples:
-        # Construct the prompt (same logic as in LLMFS)
         current_state = example['initial_state']
         operation = example['operation']
+        op_type = example['operation_type']
         
-        # Extract operation and parameters for better formatting
-        if '(' in operation and ')' in operation:
-            op_name = operation.split('(')[0]
-            params_part = operation[operation.find('(')+1:operation.rfind(')')]
-            
-            prompt = f"""You are a filesystem. Given the current state and an operation, return EXACTLY the new filesystem state.
-
-Current filesystem state:
-{current_state}
-
-Operation: {operation}
-
-CRITICAL REQUIREMENTS:
-- Return the COMPLETE filesystem tree in EXACT same format as input
-- Use root:root for ownership (not user:user)
-- Preserve exact timestamp format: "Jun 14 17:57"
-- Include file sizes (e.g., "36 B", "0 B")
-- Use exact tree symbols: ├── └── │
-- If operation fails (file doesn't exist, etc.), return UNCHANGED state
-- NO extra text, just the filesystem tree
-
-New filesystem state:"""
-        else:
-            # Fallback for malformed operations
-            prompt = f"""You are a filesystem. Given the current state and an operation, return the new state.
-
-Current filesystem state:
-{current_state}
-
-Operation: {operation}
-
-New filesystem state:"""
-        
-        completion = example['result']
+        if op_type == 'state_change':
+            # STATE MONAD: State -> Operation -> State
+            prompt = f"<W>\n{operation}\n---\n{current_state}"
+            completion = f"{example['result']}\n{STATE_STOP_TOKEN}"
+        else:  # op_type == 'query'
+            # STATE QUERY: State -> Query -> Result
+            prompt = f"<R>\n{operation}\n---\n{current_state}"
+            completion = example['result']
         
         hf_examples.append({
             'prompt': prompt,
@@ -847,19 +1425,29 @@ def save_hf_format(examples: List[Dict[str, Any]], output_file: str) -> None:
     """
     hf_examples = convert_to_hf_format(examples)
     
+    def validate_text(text: str, field_name: str) -> None:
+        if "... (" in text:
+            raise ValueError(
+                f"Detected legacy truncation marker in {field_name}; dataset must contain full bodies."
+            )
+
     with open(output_file, 'w') as f:
         for example in hf_examples:
+            validate_text(example['prompt'], 'prompt')
+            validate_text(example['completion'], 'completion')
             f.write(json.dumps(example) + '\n')
 
 def main():
     """Main CLI entry point."""
     parser = argparse.ArgumentParser(
-        description="Generate synthetic FUSE filesystem training data",
+        description="Generate synthetic FUSE filesystem training data with deterministic output naming",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python -m train.generate_data --num_examples 10 --output test_data.json
-  python -m train.generate_data -n 50 -o training_data.json
+  python -m train.generate_data --num_examples 100 --output_dir /app/data/train
+  python -m train.generate_data -n 1000 --output_dir ./data/train
+  
+Output files are automatically named: fuse_{num_samples}_{unixtime}.jsonl
         """
     )
     
@@ -871,22 +1459,28 @@ Examples:
     )
     
     parser.add_argument(
-        '-o', '--output',
+        '--output_dir',
         type=str,
-        default='training_data.json',
-        help='Output file path (default: training_data.json)'
+        default='/app/data/train',
+        help='Output directory for generated data (default: /app/data/train)'
     )
-    
     parser.add_argument(
-        '--hf-format',
-        action='store_true',
-        help='Save in HuggingFace JSONL format instead of structured JSON'
+        '--targeted_prob',
+        type=float,
+        default=DEFAULT_TARGETED_PROB,
+        help=f'Probability to generate a targeted edge-case example (default: {DEFAULT_TARGETED_PROB})'
     )
     
     args = parser.parse_args()
     
+    print(f"🚀 Starting FUSE data generation...")
+    print(f"📊 Samples: {args.num_examples}")
+    print(f"📁 Output directory: {args.output_dir}")
+    print(f"📋 Format: HuggingFace JSONL (deterministic naming)")
+    print()
+    
     # Generate the data
-    generate_data(num_examples=args.num_examples, output_file=args.output, hf_format=args.hf_format)
+    generate_data(num_examples=args.num_examples, output_dir=args.output_dir, targeted_prob=args.targeted_prob)
 
 if __name__ == "__main__":
     check_fuse_support()

@@ -13,15 +13,20 @@ RUN apt-get update && \
     pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
-# Create app directory
+# Create app directory and data directories
 WORKDIR /app
+RUN mkdir -p /app/data/train /app/data/eval && chmod -R 755 /app/data
 
 # Copy requirements and install Python dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy the source code
-COPY src/ ./src/
+# Copy all the source packages
+COPY common/ ./common/
+COPY llmfuse/ ./llmfuse/
+COPY llmencode/ ./llmencode/
+COPY train/ ./train/
+COPY eval/ ./eval/
 
 # Create a non-root user for safer operations
 RUN useradd -m -u 1000 appuser && \
@@ -34,6 +39,5 @@ RUN groupadd -f fuse && usermod -a -G fuse appuser
 ENV PYTHONPATH=/app
 ENV PYTHONUNBUFFERED=1
 
-# For FUSE operations, we need to run as root initially, then drop privileges
-# Default command for data generation
-CMD ["python", "-c", "from train.generate_data import generate_data; generate_data()"] 
+# Default command uses the updated train module
+CMD ["python", "-m", "train.generate_data", "--num_examples", "100", "--output_dir", "/app/data/train"] 

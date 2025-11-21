@@ -1,0 +1,720 @@
+✓ Initialized. View run at 
+https://modal.com/apps/rl-for-fun/main/ap-Ff69c5OJvQ2pjsNNRHpoNp
+
+Building image im-5RqgItquTusvMIzs5mBZRK
+
+Using legacy Image Builder version. We suggest upgrading at https://modal.com/settings/image-config.
+
+=> Step 0: FROM base
+
+=> Step 1: RUN pip install --upgrade pip setuptools wheel
+Looking in indexes: http://pypi-mirror.modal.local:5555/simple
+Requirement already satisfied: pip in /usr/local/lib/python3.11/site-packages (24.3.1)
+Collecting pip
+  Downloading http://pypi-mirror.modal.local:5555/simple/pip/pip-25.2-py3-none-any.whl.metadata (4.7 kB)
+Requirement already satisfied: setuptools in /usr/local/lib/python3.11/site-packages (65.5.1)
+Collecting setuptools
+  Downloading http://pypi-mirror.modal.local:5555/simple/setuptools/setuptools-80.9.0-py3-none-any.whl.metadata (6.6 kB)
+Requirement already satisfied: wheel in /usr/local/lib/python3.11/site-packages (0.45.1)
+Downloading http://pypi-mirror.modal.local:5555/simple/pip/pip-25.2-py3-none-any.whl (1.8 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1.8/1.8 MB 269.8 MB/s eta 0:00:00
+Downloading http://pypi-mirror.modal.local:5555/simple/setuptools/setuptools-80.9.0-py3-none-any.whl (1.2 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1.2/1.2 MB 188.9 MB/s eta 0:00:00
+Installing collected packages: setuptools, pip
+  Attempting uninstall: setuptools
+    Found existing installation: setuptools 65.5.1
+    Uninstalling setuptools-65.5.1:
+      Successfully uninstalled setuptools-65.5.1
+  Attempting uninstall: pip
+    Found existing installation: pip 24.3.1
+    Uninstalling pip-24.3.1:
+      Successfully uninstalled pip-24.3.1
+Successfully installed pip-25.2 setuptools-80.9.0
+
+=> Step 2: RUN echo 'Build timestamp: 10565426830500'
+Build timestamp: 10565426830500
+Saving image...
+Image saved, took 1.04s
+
+Built image im-5RqgItquTusvMIzs5mBZRK in 11.09s
+
+
+Building image im-ilEntLG42XCEbpva5lw2s2
+
+Using legacy Image Builder version. We suggest upgrading at https://modal.com/settings/image-config.
+
+=> Step 0: FROM base
+
+=> Step 1: WORKDIR /root
+Saving image...
+Image saved, took 944.49ms
+
+Built image im-ilEntLG42XCEbpva5lw2s2 in 3.02s
+
+
+
+✓ Created objects.
+├── 🔨 Created mount 
+│   /Users/rohangupta/Desktop/Developer/llmfuse/train/sft_modal.py
+├── 🔨 Created mount train/sft_cloud.py
+├── 🔨 Created mount /Users/rohangupta/Desktop/Developer/llmfuse/data
+├── 🔨 Created mount /Users/rohangupta/Desktop/Developer/llmfuse/llmencode
+├── 🔨 Created mount /Users/rohangupta/Desktop/Developer/llmfuse/llmfuse
+├── 🔨 Created mount /Users/rohangupta/Desktop/Developer/llmfuse/common
+├── 🔨 Created mount /Users/rohangupta/Desktop/Developer/llmfuse/eval
+├── 🔨 Created function prepare_training_data.
+├── 🔨 Created function train_qwen.
+├── 🔨 Created function eval_trained_model_on_test_set.
+├── 🔨 Created function test_trained_model.
+├── 🔨 Created function eval_trained_model_comprehensive.
+├── 🔨 Created function create_test_split.
+├── 🔨 Created function list_volume_contents.
+├── 🔨 Created function download_trained_model.
+└── 🔨 Created function eval_on_dataset.
+🚀 Starting distributed SFT training for qwen3-4b
+🔧 Configuration:
+   GPUs: 8x H100
+   Training data: data/train/fuse_5000_1760902673.jsonl
+   Per-device batch size: 4
+   Global batch size: 128
+   Epochs: 3
+   Learning rate: 2e-05
+   W&B logging: True
+📁 Using training data from: /root/data/train/fuse_5000_1760902673.jsonl
+✅ Training data ready at /root/training_data.jsonl
+🔥 Executing torchrun with command:
+   torchrun --nnodes=1 --nproc-per-node=8 --master-addr=localhost --master-port=29500 /root/sft_cloud.py --model_name qwen3-4b --output_dir /root/output_models/qwen3-4b-sft-3epochs-distributed --training_data /root/training_data.jsonl --num_epochs 3 --batch_size 4 --learning_rate 2e-05 --use_wandb --gradient_checkpointing
+Initializing process group for rank 4
+Initializing process group for rank 0
+Initializing process group for rank 7
+Initializing process group for rank 3
+Initializing process group for rank 1
+Initializing process group for rank 2
+Initializing process group for rank 6
+Initializing process group for rank 5
+Rank 2 using GPU 2
+🤖 Using base model: Qwen/Qwen3-4B
+📁 Loading training data...
+Rank 7 using GPU 7
+🤖 Using base model: Qwen/Qwen3-4B
+📁 Loading training data...
+Rank 3 using GPU 3
+🤖 Using base model: Qwen/Qwen3-4B
+📁 Loading training data...
+Rank 4 using GPU 4Rank 1 using GPU 1
+🤖 Using base model: Qwen/Qwen3-4B
+🤖 Using base model: Qwen/Qwen3-4B
+📁 Loading training data...
+
+📁 Loading training data...
+Rank 5 using GPU 5
+🤖 Using base model: Qwen/Qwen3-4B
+📁 Loading training data...
+Rank 6 using GPU 6
+🤖 Using base model: Qwen/Qwen3-4B
+📁 Loading training data...
+Rank 0 using GPU 0
+🤖 Using base model: Qwen/Qwen3-4B
+📁 Loading training data...
+✅ Loaded 5000 total examples
+📊 Split: 4500 train, 500 test (90%/10%)
+✅ Loaded 5000 total examples
+📊 Split: 4500 train, 500 test (90%/10%)
+✅ Loaded 5000 total examples
+📊 Split: 4500 train, 500 test (90%/10%)
+✅ Loaded 5000 total examples
+✅ Loaded 5000 total examples
+📊 Split: 4500 train, 500 test (90%/10%)
+📊 Split: 4500 train, 500 test (90%/10%)
+✅ Loaded 5000 total examples
+✅ Loaded 5000 total examples
+📊 Split: 4500 train, 500 test (90%/10%)
+📊 Split: 4500 train, 500 test (90%/10%)
+✅ Loaded 5000 total examples
+📊 Split: 4500 train, 500 test (90%/10%)
+💾 Saved test set to /root/output_models/qwen3-4b-sft-3epochs-distributed/test_data.jsonl
+💾 Saved test set to /root/output_models/qwen3-4b-sft-3epochs-distributed/test_data.jsonl
+💾 Saved test set to /root/output_models/qwen3-4b-sft-3epochs-distributed/test_data.jsonl
+💾 Saved test set to /root/output_models/qwen3-4b-sft-3epochs-distributed/test_data.jsonl
+💾 Saved test set to /root/output_models/qwen3-4b-sft-3epochs-distributed/test_data.jsonl
+💾 Saved test set to /root/output_models/qwen3-4b-sft-3epochs-distributed/test_data.jsonl
+💾 Saved test set to /root/output_models/qwen3-4b-sft-3epochs-distributed/test_data.jsonl
+💾 Saved test set to /root/output_models/qwen3-4b-sft-3epochs-distributed/test_data.jsonl
+📊 Dataset size: 4500
+🔄 Loading model and tokenizer...
+📊 Dataset size: 4500
+🔄 Loading model and tokenizer...
+📊 Dataset size: 4500
+🔄 Loading model and tokenizer...
+📊 Dataset size: 4500
+🔄 Loading model and tokenizer...
+📊 Dataset size: 4500
+🔄 Loading model and tokenizer...
+📊 Dataset size: 4500
+🔄 Loading model and tokenizer...
+📊 Dataset size: 4500
+🔄 Loading model and tokenizer...
+📊 Dataset size: 4500
+🔄 Loading model and tokenizer...
+
+[1AFetching 3 files:   0%|          | 0/3 [00:00<?, ?it/s]Fetching 3 files:   0%|          | 0/3 [00:00<?, ?it/s]
+[1AFetching 3 files:   0%|          | 0/3 [00:00<?, ?it/s]Fetching 3 files:   0%|          | 0/3 [00:00<?, ?it/s]Fetching 3 files:   0%|          | 0/3 [00:00<?, ?it/s]Fetching 3 files:   0%|          | 0/3 [00:00<?, ?it/s]
+[1AFetching 3 files:   0%|          | 0/3 [00:00<?, ?it/s]
+[1AFetching 3 files:   0%|          | 0/3 [00:00<?, ?it/s]Fetching 3 files:  33%|███▎      | 1/3 [00:31<01:03, 31.55s/it]
+[1AFetching 3 files:  33%|███▎      | 1/3 [00:31<01:03, 31.52s/it]Fetching 3 files:  33%|███▎      | 1/3 [00:31<01:03, 31.57s/it]
+[1AFetching 3 files:  33%|███▎      | 1/3 [00:31<01:03, 31.53s/it]
+[1AFetching 3 files:  33%|███▎      | 1/3 [00:31<01:03, 31.54s/it]Fetching 3 files:  33%|███▎      | 1/3 [00:31<01:02, 31.43s/it]Fetching 3 files:  33%|███▎      | 1/3 [00:31<01:03, 31.59s/it]
+[1AFetching 3 files:  33%|███▎      | 1/3 [00:31<01:03, 31.56s/it]Fetching 3 files:  67%|██████▋   | 2/3 [00:32<00:13, 13.54s/it]Fetching 3 files: 100%|██████████| 3/3 [00:32<00:00, 10.83s/it]
+Fetching 3 files:  67%|██████▋   | 2/3 [00:32<00:13, 13.54s/it]Fetching 3 files: 100%|██████████| 3/3 [00:32<00:00, 10.83s/it]
+Fetching 3 files:  67%|██████▋   | 2/3 [00:32<00:13, 13.52s/it]Fetching 3 files: 100%|██████████| 3/3 [00:32<00:00, 10.82s/it]
+Fetching 3 files:  67%|██████▋   | 2/3 [00:32<00:13, 13.48s/it]Fetching 3 files: 100%|██████████| 3/3 [00:32<00:00, 10.78s/it]
+Fetching 3 files:  67%|██████▋   | 2/3 [00:32<00:13, 13.54s/it]Fetching 3 files: 100%|██████████| 3/3 [00:32<00:00, 10.83s/it]
+Fetching 3 files:  67%|██████▋   | 2/3 [00:32<00:13, 13.53s/it]Fetching 3 files: 100%|██████████| 3/3 [00:32<00:00, 10.83s/it]
+Fetching 3 files:  67%|██████▋   | 2/3 [00:32<00:13, 13.55s/it]Fetching 3 files: 100%|██████████| 3/3 [00:32<00:00, 10.83s/it]
+Fetching 3 files:  67%|██████▋   | 2/3 [00:32<00:13, 13.55s/it]Fetching 3 files: 100%|██████████| 3/3 [00:32<00:00, 10.83s/it]
+
+[1ALoading checkpoint shards:   0%|          | 0/3 [00:00<?, ?it/s]
+[1ALoading checkpoint shards:   0%|          | 0/3 [00:00<?, ?it/s]Loading checkpoint shards:   0%|          | 0/3 [00:00<?, ?it/s]
+[1ALoading checkpoint shards:   0%|          | 0/3 [00:00<?, ?it/s]Loading checkpoint shards:   0%|          | 0/3 [00:00<?, ?it/s]
+[1ALoading checkpoint shards:   0%|          | 0/3 [00:00<?, ?it/s]Loading checkpoint shards:   0%|          | 0/3 [00:00<?, ?it/s]
+[1ALoading checkpoint shards:   0%|          | 0/3 [00:00<?, ?it/s]Loading checkpoint shards:  67%|██████▋   | 2/3 [00:00<00:00, 15.18it/s]Loading checkpoint shards: 100%|██████████| 3/3 [00:00<00:00, 22.13it/s]
+Loading checkpoint shards:  67%|██████▋   | 2/3 [00:00<00:00, 15.58it/s]Loading checkpoint shards:  67%|██████▋   | 2/3 [00:00<00:00, 16.13it/s]Loading checkpoint shards:  67%|██████▋   | 2/3 [00:00<00:00, 15.01it/s]Loading checkpoint shards: 100%|██████████| 3/3 [00:00<00:00, 22.77it/s]
+Loading checkpoint shards:  67%|██████▋   | 2/3 [00:00<00:00, 13.61it/s]Loading checkpoint shards:  67%|██████▋   | 2/3 [00:00<00:00, 16.06it/s]Loading checkpoint shards: 100%|██████████| 3/3 [00:00<00:00, 23.55it/s]
+Loading checkpoint shards: 100%|██████████| 3/3 [00:00<00:00, 22.00it/s]
+
+[1ALoading checkpoint shards:  67%|██████▋   | 2/3 [00:00<00:00, 14.87it/s]Loading checkpoint shards: 100%|██████████| 3/3 [00:00<00:00, 23.48it/s]
+Loading checkpoint shards: 100%|██████████| 3/3 [00:00<00:00, 19.90it/s]
+Loading checkpoint shards: 100%|██████████| 3/3 [00:00<00:00, 21.79it/s]
+Loading checkpoint shards:  67%|██████▋   | 2/3 [00:00<00:00, 13.06it/s]Loading checkpoint shards: 100%|██████████| 3/3 [00:00<00:00, 19.08it/s]
+🔧 Training configuration:
+   World size: 8
+   Per-device batch size: 4
+   Gradient accumulation: 4
+   Global batch size: 128
+🔧 Training configuration:
+   World size: 8
+   Per-device batch size: 4
+   Gradient accumulation: 4
+   Global batch size: 128
+🔧 Training configuration:
+   World size: 8
+   Per-device batch size: 4
+   Gradient accumulation: 4
+   Global batch size: 128
+🔧 Training configuration:
+   World size: 8
+   Per-device batch size: 4
+   Gradient accumulation: 4
+   Global batch size: 128
+🔧 Training configuration:
+   World size: 8
+   Per-device batch size: 4
+   Gradient accumulation: 4
+   Global batch size: 128
+🔧 Training configuration:
+   World size: 8
+   Per-device batch size: 4
+   Gradient accumulation: 4
+   Global batch size: 128
+🔧 Training configuration:
+   World size: 8
+   Per-device batch size: 4
+   Gradient accumulation: 4
+   Global batch size: 128
+🔧 Training configuration:
+   World size: 8
+   Per-device batch size: 4
+   Gradient accumulation: 4
+   Global batch size: 128
+🔄 Transforming dataset for SFTTrainer...
+
+🔄 Transforming dataset for SFTTrainer...
+[1AMap:   0%|          | 0/4500 [00:00<?, ? examples/s]
+🔄 Transforming dataset for SFTTrainer...
+🔄 Transforming dataset for SFTTrainer...
+[1AMap:   0%|          | 0/4500 [00:00<?, ? examples/s]Map:   0%|          | 0/4500 [00:00<?, ? examples/s]Map:   0%|          | 0/4500 [00:00<?, ? examples/s]
+🔄 Transforming dataset for SFTTrainer...
+🔄 Transforming dataset for SFTTrainer...
+🔄 Transforming dataset for SFTTrainer...
+🔄 Transforming dataset for SFTTrainer...
+[1AMap:   0%|          | 0/4500 [00:00<?, ? examples/s]Map:   0%|          | 0/4500 [00:00<?, ? examples/s]Map:   0%|          | 0/4500 [00:00<?, ? examples/s]
+[1AMap:   0%|          | 0/4500 [00:00<?, ? examples/s]
+[1AMap:  84%|████████▍ | 3776/4500 [00:00<00:00, 37585.74 examples/s]Map: 100%|██████████| 4500/4500 [00:00<00:00, 34597.33 examples/s]
+🏋️ Initializing SFTTrainer...
+Map:  89%|████████▉ | 3999/4500 [00:00<00:00, 36337.80 examples/s]Map:  74%|███████▍  | 3333/4500 [00:00<00:00, 33177.68 examples/s]
+[1AMap:  89%|████████▉ | 4000/4500 [00:00<00:00, 33197.16 examples/s]Map:  88%|████████▊ | 3965/4500 [00:00<00:00, 35325.24 examples/s]Map:  88%|████████▊ | 3948/4500 [00:00<00:00, 34991.90 examples/s]
+[1AMap:  89%|████████▉ | 4000/4500 [00:00<00:00, 34533.81 examples/s]Map: 100%|██████████| 4500/4500 [00:00<00:00, 33220.05 examples/s]
+
+🏋️ Initializing SFTTrainer...
+[1AMap:  89%|████████▉ | 4000/4500 [00:00<00:00, 32355.78 examples/s]Map: 100%|██████████| 4500/4500 [00:00<00:00, 33270.00 examples/s]
+Map: 100%|██████████| 4500/4500 [00:00<00:00, 34321.46 examples/s]
+🏋️ Initializing SFTTrainer...
+🏋️ Initializing SFTTrainer...
+Map: 100%|██████████| 4500/4500 [00:00<00:00, 32736.34 examples/s]
+Map: 100%|██████████| 4500/4500 [00:00<00:00, 32392.28 examples/s]
+Map: 100%|██████████| 4500/4500 [00:00<00:00, 31937.14 examples/s]
+🏋️ Initializing SFTTrainer...
+🏋️ Initializing SFTTrainer...
+🏋️ Initializing SFTTrainer...
+Map: 100%|██████████| 4500/4500 [00:00<00:00, 32018.67 examples/s]
+🏋️ Initializing SFTTrainer...
+
+[1AMap:   0%|          | 0/4500 [00:00<?, ? examples/s]
+[1AMap:  22%|██▏       | 1000/4500 [00:00<00:03, 1056.21 examples/s]
+[1AMap:  44%|████▍     | 2000/4500 [00:01<00:02, 1031.42 examples/s]
+[1AMap:  67%|██████▋   | 3000/4500 [00:02<00:01, 1064.35 examples/s]
+[1AMap:  89%|████████▉ | 4000/4500 [00:03<00:00, 1076.42 examples/s]Map: 100%|██████████| 4500/4500 [00:04<00:00, 1087.16 examples/s]Map: 100%|██████████| 4500/4500 [00:04<00:00, 1072.77 examples/s]
+/usr/local/lib/python3.11/site-packages/trl/trainer/sft_trainer.py:413: FutureWarning: `tokenizer` is deprecated and will be removed in version 5.0.0 for `SFTTrainer.__init__`. Use `processing_class` instead.
+  super().__init__(
+Detected kernel version 4.4.0, which is below the recommended minimum of 5.5.0; this can cause the process to hang. It is recommended to upgrade the kernel to the minimum version or higher.
+Map:   0%|          | 0/4500 [00:00<?, ? examples/s]
+[1AMap:   0%|          | 0/4500 [00:00<?, ? examples/s]
+[1AMap:   0%|          | 0/4500 [00:00<?, ? examples/s]
+[1AMap:   0%|          | 0/4500 [00:00<?, ? examples/s]
+[1AMap:   0%|          | 0/4500 [00:00<?, ? examples/s]
+[1AMap:   0%|          | 0/4500 [00:00<?, ? examples/s]
+🚀 Starting distributed training...
+[1AMap:   0%|          | 0/4500 [00:00<?, ? examples/s]
+[1AMap:  22%|██▏       | 1000/4500 [00:01<00:03, 998.30 examples/s]
+[1AMap:  22%|██▏       | 1000/4500 [00:01<00:03, 999.10 examples/s]
+[1AMap:  22%|██▏       | 1000/4500 [00:01<00:03, 906.66 examples/s]
+[1AMap:  22%|██▏       | 1000/4500 [00:01<00:04, 860.70 examples/s]
+[1AMap:  22%|██▏       | 1000/4500 [00:01<00:03, 914.34 examples/s]
+[1AMap:  22%|██▏       | 1000/4500 [00:01<00:04, 849.10 examples/s]
+[1AMap:  22%|██▏       | 1000/4500 [00:01<00:03, 929.02 examples/s]Map:  44%|████▍     | 2000/4500 [00:02<00:02, 947.94 examples/s]Map:  44%|████▍     | 2000/4500 [00:02<00:02, 935.17 examples/s]
+[1AMap:  44%|████▍     | 2000/4500 [00:02<00:02, 936.71 examples/s]
+[1AMap:  44%|████▍     | 2000/4500 [00:02<00:02, 930.79 examples/s]
+[1AMap:  44%|████▍     | 2000/4500 [00:02<00:02, 925.85 examples/s]
+[1AMap:  44%|████▍     | 2000/4500 [00:02<00:02, 905.49 examples/s]
+[1AMap:  44%|████▍     | 2000/4500 [00:02<00:02, 910.33 examples/s]
+[1AMap:  67%|██████▋   | 3000/4500 [00:03<00:01, 978.44 examples/s]
+[1AMap:  67%|██████▋   | 3000/4500 [00:03<00:01, 940.28 examples/s]
+[1AMap:  67%|██████▋   | 3000/4500 [00:03<00:01, 937.27 examples/s]
+[1AMap:  67%|██████▋   | 3000/4500 [00:03<00:01, 938.68 examples/s]
+[1AMap:  67%|██████▋   | 3000/4500 [00:03<00:01, 958.08 examples/s]
+[1AMap:  67%|██████▋   | 3000/4500 [00:03<00:01, 936.60 examples/s]
+[1AMap:  67%|██████▋   | 3000/4500 [00:03<00:01, 932.01 examples/s]
+[1AMap:  89%|████████▉ | 4000/4500 [00:04<00:00, 1020.91 examples/s]
+[1AMap:  89%|████████▉ | 4000/4500 [00:04<00:00, 993.34 examples/s]
+[1AMap:  89%|████████▉ | 4000/4500 [00:04<00:00, 991.78 examples/s]
+[1AMap:  89%|████████▉ | 4000/4500 [00:04<00:00, 978.34 examples/s]Map:  89%|████████▉ | 4000/4500 [00:04<00:00, 989.63 examples/s]
+[1AMap:  89%|████████▉ | 4000/4500 [00:04<00:00, 974.32 examples/s]
+[1AMap:  89%|████████▉ | 4000/4500 [00:04<00:00, 988.76 examples/s]Map: 100%|██████████| 4500/4500 [00:04<00:00, 1017.72 examples/s]Map: 100%|██████████| 4500/4500 [00:04<00:00, 991.56 examples/s]
+/usr/local/lib/python3.11/site-packages/trl/trainer/sft_trainer.py:413: FutureWarning: `tokenizer` is deprecated and will be removed in version 5.0.0 for `SFTTrainer.__init__`. Use `processing_class` instead.
+  super().__init__(
+Map: 100%|██████████| 4500/4500 [00:04<00:00, 1011.21 examples/s]Map: 100%|██████████| 4500/4500 [00:04<00:00, 980.52 examples/s]
+/usr/local/lib/python3.11/site-packages/trl/trainer/sft_trainer.py:413: FutureWarning: `tokenizer` is deprecated and will be removed in version 5.0.0 for `SFTTrainer.__init__`. Use `processing_class` instead.
+  super().__init__(
+Map: 100%|██████████| 4500/4500 [00:04<00:00, 996.86 examples/s]Map: 100%|██████████| 4500/4500 [00:04<00:00, 979.48 examples/s]
+/usr/local/lib/python3.11/site-packages/trl/trainer/sft_trainer.py:413: FutureWarning: `tokenizer` is deprecated and will be removed in version 5.0.0 for `SFTTrainer.__init__`. Use `processing_class` instead.
+  super().__init__(
+Map: 100%|██████████| 4500/4500 [00:04<00:00, 982.51 examples/s]Map: 100%|██████████| 4500/4500 [00:04<00:00, 969.40 examples/s]
+/usr/local/lib/python3.11/site-packages/trl/trainer/sft_trainer.py:413: FutureWarning: `tokenizer` is deprecated and will be removed in version 5.0.0 for `SFTTrainer.__init__`. Use `processing_class` instead.
+  super().__init__(
+Map: 100%|██████████| 4500/4500 [00:04<00:00, 990.47 examples/s]Map: 100%|██████████| 4500/4500 [00:04<00:00, 968.72 examples/s]
+Map: 100%|██████████| 4500/4500 [00:04<00:00, 979.62 examples/s]/usr/local/lib/python3.11/site-packages/trl/trainer/sft_trainer.py:413: FutureWarning: `tokenizer` is deprecated and will be removed in version 5.0.0 for `SFTTrainer.__init__`. Use `processing_class` instead.
+  super().__init__(
+Map: 100%|██████████| 4500/4500 [00:04<00:00, 956.61 examples/s]
+/usr/local/lib/python3.11/site-packages/trl/trainer/sft_trainer.py:413: FutureWarning: `tokenizer` is deprecated and will be removed in version 5.0.0 for `SFTTrainer.__init__`. Use `processing_class` instead.
+  super().__init__(
+Map: 100%|██████████| 4500/4500 [00:04<00:00, 991.58 examples/s]Map: 100%|██████████| 4500/4500 [00:04<00:00, 967.58 examples/s]
+/usr/local/lib/python3.11/site-packages/trl/trainer/sft_trainer.py:413: FutureWarning: `tokenizer` is deprecated and will be removed in version 5.0.0 for `SFTTrainer.__init__`. Use `processing_class` instead.
+  super().__init__(
+🚀 Starting distributed training...
+🚀 Starting distributed training...
+🚀 Starting distributed training...
+🚀 Starting distributed training...
+🚀 Starting distributed training...
+🚀 Starting distributed training...
+🚀 Starting distributed training...
+wandb: Currently logged in as: pawalt. Use `wandb login --relogin` to force relogin
+wandb: wandb version 0.22.2 is available!  To upgrade, please run:
+wandb:  $ pip install wandb --upgrade
+wandb: Tracking run with wandb version 0.17.5
+wandb: Run data is saved locally in /root/wandb/run-20251019_200933-abkd0x9d
+wandb: Run `wandb offline` to turn off syncing.
+wandb: Syncing run qwen-sft-qwen3-4b-3epochs-distributed
+wandb: ⭐️ View project at https://wandb.ai/pawalt/qwen3-filesystem-sft
+wandb: 🚀 View run at https://wandb.ai/pawalt/qwen3-filesystem-sft/runs/abkd0x9d
+
+[1A  0%|          | 0/108 [00:00<?, ?it/s]/usr/local/lib/python3.11/site-packages/torch/utils/checkpoint.py:295: FutureWarning: `torch.cpu.amp.autocast(args...)` is deprecated. Please use `torch.amp.autocast('cpu', args...)` instead.
+  with torch.enable_grad(), device_autocast_ctx, torch.cpu.amp.autocast(**ctx.cpu_autocast_kwargs):  # type: ignore[attr-defined]
+/usr/local/lib/python3.11/site-packages/torch/utils/checkpoint.py:295: FutureWarning: `torch.cpu.amp.autocast(args...)` is deprecated. Please use `torch.amp.autocast('cpu', args...)` instead.
+  with torch.enable_grad(), device_autocast_ctx, torch.cpu.amp.autocast(**ctx.cpu_autocast_kwargs):  # type: ignore[attr-defined]
+/usr/local/lib/python3.11/site-packages/torch/utils/checkpoint.py:295: FutureWarning: `torch.cpu.amp.autocast(args...)` is deprecated. Please use `torch.amp.autocast('cpu', args...)` instead.
+  with torch.enable_grad(), device_autocast_ctx, torch.cpu.amp.autocast(**ctx.cpu_autocast_kwargs):  # type: ignore[attr-defined]
+/usr/local/lib/python3.11/site-packages/torch/utils/checkpoint.py:295: FutureWarning: `torch.cpu.amp.autocast(args...)` is deprecated. Please use `torch.amp.autocast('cpu', args...)` instead.
+  with torch.enable_grad(), device_autocast_ctx, torch.cpu.amp.autocast(**ctx.cpu_autocast_kwargs):  # type: ignore[attr-defined]
+/usr/local/lib/python3.11/site-packages/torch/utils/checkpoint.py:295: FutureWarning: `torch.cpu.amp.autocast(args...)` is deprecated. Please use `torch.amp.autocast('cpu', args...)` instead.
+  with torch.enable_grad(), device_autocast_ctx, torch.cpu.amp.autocast(**ctx.cpu_autocast_kwargs):  # type: ignore[attr-defined]
+/usr/local/lib/python3.11/site-packages/torch/utils/checkpoint.py:295: FutureWarning: `torch.cpu.amp.autocast(args...)` is deprecated. Please use `torch.amp.autocast('cpu', args...)` instead.
+  with torch.enable_grad(), device_autocast_ctx, torch.cpu.amp.autocast(**ctx.cpu_autocast_kwargs):  # type: ignore[attr-defined]
+/usr/local/lib/python3.11/site-packages/torch/utils/checkpoint.py:295: FutureWarning: `torch.cpu.amp.autocast(args...)` is deprecated. Please use `torch.amp.autocast('cpu', args...)` instead.
+  with torch.enable_grad(), device_autocast_ctx, torch.cpu.amp.autocast(**ctx.cpu_autocast_kwargs):  # type: ignore[attr-defined]
+/usr/local/lib/python3.11/site-packages/torch/utils/checkpoint.py:295: FutureWarning: `torch.cpu.amp.autocast(args...)` is deprecated. Please use `torch.amp.autocast('cpu', args...)` instead.
+  with torch.enable_grad(), device_autocast_ctx, torch.cpu.amp.autocast(**ctx.cpu_autocast_kwargs):  # type: ignore[attr-defined]
+
+[1A  1%|          | 1/108 [00:02<04:26,  2.49s/it]                             
+{'loss': 2.2274, 'grad_norm': 45.5, 'learning_rate': 0.0, 'epoch': 0.03}
+[1A  1%|          | 1/108 [00:02<04:26,  2.49s/it]
+[1A  2%|▏         | 2/108 [00:03<03:01,  1.71s/it]                             
+{'loss': 2.0633, 'grad_norm': 42.75, 'learning_rate': 1.8181818181818183e-06, 'epoch': 0.06}
+[1A  2%|▏         | 2/108 [00:03<03:01,  1.71s/it]
+[1A  3%|▎         | 3/108 [00:04<02:29,  1.42s/it]                             
+{'loss': 2.121, 'grad_norm': 39.0, 'learning_rate': 3.6363636363636366e-06, 'epoch': 0.09}
+[1A  3%|▎         | 3/108 [00:04<02:29,  1.42s/it]
+[1A  4%|▎         | 4/108 [00:05<02:14,  1.29s/it]                             
+{'loss': 2.0655, 'grad_norm': 25.875, 'learning_rate': 5.4545454545454545e-06, 'epoch': 0.11}
+[1A  4%|▎         | 4/108 [00:05<02:14,  1.29s/it]
+[1A  5%|▍         | 5/108 [00:06<02:07,  1.24s/it]                             
+{'loss': 1.8586, 'grad_norm': 15.1875, 'learning_rate': 7.272727272727273e-06, 'epoch': 0.14}
+[1A  5%|▍         | 5/108 [00:07<02:07,  1.24s/it]
+[1A  6%|▌         | 6/108 [00:08<01:59,  1.17s/it]                             
+{'loss': 1.8886, 'grad_norm': 13.5, 'learning_rate': 9.090909090909091e-06, 'epoch': 0.17}
+[1A  6%|▌         | 6/108 [00:08<01:59,  1.17s/it]
+[1A  6%|▋         | 7/108 [00:09<01:58,  1.17s/it]                             
+{'loss': 1.6844, 'grad_norm': 10.5, 'learning_rate': 1.0909090909090909e-05, 'epoch': 0.2}
+[1A  6%|▋         | 7/108 [00:09<01:58,  1.17s/it]
+[1A  7%|▋         | 8/108 [00:10<01:54,  1.14s/it]                             
+{'loss': 1.4659, 'grad_norm': 9.0625, 'learning_rate': 1.2727272727272728e-05, 'epoch': 0.23}
+[1A  7%|▋         | 8/108 [00:10<01:54,  1.14s/it]
+[1A  8%|▊         | 9/108 [00:11<01:51,  1.13s/it]                             
+{'loss': 1.3087, 'grad_norm': 8.5, 'learning_rate': 1.4545454545454546e-05, 'epoch': 0.26}
+[1A  8%|▊         | 9/108 [00:11<01:51,  1.13s/it]
+[1A  9%|▉         | 10/108 [00:12<01:51,  1.14s/it]                            
+{'loss': 1.1404, 'grad_norm': 8.4375, 'learning_rate': 1.6363636363636366e-05, 'epoch': 0.28}
+[1A  9%|▉         | 10/108 [00:12<01:51,  1.14s/it]
+[1A 10%|█         | 11/108 [00:13<01:50,  1.14s/it]                            
+{'loss': 0.9438, 'grad_norm': 7.34375, 'learning_rate': 1.8181818181818182e-05, 'epoch': 0.31}
+[1A 10%|█         | 11/108 [00:13<01:50,  1.14s/it]
+[1A 11%|█         | 12/108 [00:14<01:48,  1.13s/it]                            
+{'loss': 0.7674, 'grad_norm': 5.5, 'learning_rate': 2e-05, 'epoch': 0.34}
+[1A 11%|█         | 12/108 [00:14<01:48,  1.13s/it]
+[1A 12%|█▏        | 13/108 [00:15<01:47,  1.13s/it]                            
+{'loss': 0.6534, 'grad_norm': 3.390625, 'learning_rate': 1.9994755690455154e-05, 'epoch': 0.37}
+[1A 12%|█▏        | 13/108 [00:15<01:47,  1.13s/it]
+[1A 13%|█▎        | 14/108 [00:16<01:45,  1.12s/it]                            
+{'loss': 0.5316, 'grad_norm': 2.25, 'learning_rate': 1.997902826237712e-05, 'epoch': 0.4}
+[1A 13%|█▎        | 14/108 [00:17<01:45,  1.12s/it]
+[1A 14%|█▍        | 15/108 [00:18<01:42,  1.10s/it]                            
+{'loss': 0.4762, 'grad_norm': 2.34375, 'learning_rate': 1.995283421166614e-05, 'epoch': 0.43}
+[1A 14%|█▍        | 15/108 [00:18<01:42,  1.10s/it]
+[1A 15%|█▍        | 16/108 [00:19<01:41,  1.11s/it]                            
+{'loss': 0.4517, 'grad_norm': 4.65625, 'learning_rate': 1.9916201012264255e-05, 'epoch': 0.45}
+[1A 15%|█▍        | 16/108 [00:19<01:41,  1.11s/it]
+[1A 16%|█▌        | 17/108 [00:20<01:41,  1.12s/it]                            
+{'loss': 0.4334, 'grad_norm': 2.078125, 'learning_rate': 1.9869167087338908e-05, 'epoch': 0.48}
+[1A 16%|█▌        | 17/108 [00:20<01:41,  1.12s/it]
+[1A 17%|█▋        | 18/108 [00:21<01:39,  1.11s/it]                            
+{'loss': 0.3899, 'grad_norm': 1.578125, 'learning_rate': 1.9811781768982392e-05, 'epoch': 0.51}
+[1A 17%|█▋        | 18/108 [00:21<01:39,  1.11s/it]
+[1A 18%|█▊        | 19/108 [00:22<01:39,  1.12s/it]                            
+{'loss': 0.359, 'grad_norm': 1.0390625, 'learning_rate': 1.9744105246469264e-05, 'epoch': 0.54}
+[1A 18%|█▊        | 19/108 [00:22<01:39,  1.12s/it]
+[1A 19%|█▊        | 20/108 [00:23<01:37,  1.10s/it]                            
+{'loss': 0.3368, 'grad_norm': 1.4140625, 'learning_rate': 1.9666208503126115e-05, 'epoch': 0.57}
+[1A 19%|█▊        | 20/108 [00:23<01:37,  1.10s/it]
+{'loss': 0.3269, 'grad_norm': 1.203125, 'learning_rate': 1.957817324187987e-05, 'epoch': 0.6}
+[1A 19%|█▉        | 21/108 [00:24<01:36,  1.10s/it]                            
+[1A 19%|█▉        | 21/108 [00:24<01:36,  1.10s/it]
+[1A 20%|██        | 22/108 [00:25<01:35,  1.11s/it]                            
+{'loss': 0.3285, 'grad_norm': 0.87890625, 'learning_rate': 1.9480091799562706e-05, 'epoch': 0.62}
+[1A 20%|██        | 22/108 [00:25<01:35,  1.11s/it]
+[1A 21%|██▏       | 23/108 [00:26<01:34,  1.11s/it]                            
+{'loss': 0.3259, 'grad_norm': 1.078125, 'learning_rate': 1.937206705006344e-05, 'epoch': 0.65}
+[1A 21%|██▏       | 23/108 [00:26<01:34,  1.11s/it]
+[1A 22%|██▏       | 24/108 [00:28<01:33,  1.12s/it]                            
+{'loss': 0.3054, 'grad_norm': 0.9375, 'learning_rate': 1.9254212296427043e-05, 'epoch': 0.68}
+[1A 22%|██▏       | 24/108 [00:28<01:33,  1.12s/it]
+[1A 23%|██▎       | 25/108 [00:29<01:33,  1.13s/it]                            
+{'loss': 0.3057, 'grad_norm': 1.171875, 'learning_rate': 1.9126651152015404e-05, 'epoch': 0.71}
+[1A 23%|██▎       | 25/108 [00:29<01:33,  1.13s/it]
+{'loss': 0.2819, 'grad_norm': 0.99609375, 'learning_rate': 1.8989517410853956e-05, 'epoch': 0.74}
+[1A 24%|██▍       | 26/108 [00:30<01:32,  1.13s/it]                            
+[1A 24%|██▍       | 26/108 [00:30<01:32,  1.13s/it]
+[1A 25%|██▌       | 27/108 [00:31<01:29,  1.11s/it]                            
+{'loss': 0.2878, 'grad_norm': 1.71875, 'learning_rate': 1.8842954907300236e-05, 'epoch': 0.77}
+[1A 25%|██▌       | 27/108 [00:31<01:29,  1.11s/it]
+[1A 26%|██▌       | 28/108 [00:32<01:29,  1.12s/it]                            
+{'loss': 0.2521, 'grad_norm': 2.078125, 'learning_rate': 1.8687117365181514e-05, 'epoch': 0.79}
+[1A 26%|██▌       | 28/108 [00:32<01:29,  1.12s/it]
+[1A 27%|██▋       | 29/108 [00:33<01:27,  1.10s/it]                            
+{'loss': 0.2616, 'grad_norm': 1.0546875, 'learning_rate': 1.8522168236559693e-05, 'epoch': 0.82}
+[1A 27%|██▋       | 29/108 [00:33<01:27,  1.10s/it]
+[1A 28%|██▊       | 30/108 [00:34<01:26,  1.10s/it]                            
+{'loss': 0.2691, 'grad_norm': 0.90625, 'learning_rate': 1.8348280530292712e-05, 'epoch': 0.85}
+[1A 28%|██▊       | 30/108 [00:34<01:26,  1.10s/it]
+[1A 29%|██▊       | 31/108 [00:35<01:24,  1.10s/it]                            
+{'loss': 0.2633, 'grad_norm': 1.046875, 'learning_rate': 1.816563663057211e-05, 'epoch': 0.88}
+[1A 29%|██▊       | 31/108 [00:35<01:24,  1.10s/it]
+[1A 30%|██▉       | 32/108 [00:36<01:24,  1.11s/it]                            
+{'loss': 0.2625, 'grad_norm': 1.078125, 'learning_rate': 1.797442810562721e-05, 'epoch': 0.91}
+[1A 30%|██▉       | 32/108 [00:36<01:24,  1.11s/it]
+[1A 31%|███       | 33/108 [00:38<01:23,  1.11s/it]                            
+{'loss': 0.2591, 'grad_norm': 0.83984375, 'learning_rate': 1.7774855506796497e-05, 'epoch': 0.94}
+[1A 31%|███       | 33/108 [00:38<01:23,  1.11s/it]
+[1A 31%|███▏      | 34/108 [00:39<01:21,  1.10s/it]                            
+{'loss': 0.2579, 'grad_norm': 0.796875, 'learning_rate': 1.7567128158176955e-05, 'epoch': 0.96}
+[1A 31%|███▏      | 34/108 [00:39<01:21,  1.10s/it]
+[1A 32%|███▏      | 35/108 [00:40<01:20,  1.10s/it]                            
+{'loss': 0.2582, 'grad_norm': 0.7109375, 'learning_rate': 1.7351463937072008e-05, 'epoch': 0.99}
+[1A 32%|███▏      | 35/108 [00:40<01:20,  1.10s/it]
+{'loss': 0.2463, 'grad_norm': 1.34375, 'learning_rate': 1.7128089045468294e-05, 'epoch': 1.0}
+[1A 33%|███▎      | 36/108 [00:40<01:03,  1.13it/s]                            
+[1A 33%|███▎      | 36/108 [00:40<01:03,  1.13it/s]
+[1A 34%|███▍      | 37/108 [00:41<01:07,  1.06it/s]                            
+{'loss': 0.2385, 'grad_norm': 0.86328125, 'learning_rate': 1.6897237772781046e-05, 'epoch': 1.03}
+[1A 34%|███▍      | 37/108 [00:41<01:07,  1.06it/s]
+[1A 35%|███▌      | 38/108 [00:42<01:08,  1.02it/s]                            
+{'loss': 0.2205, 'grad_norm': 0.8046875, 'learning_rate': 1.665915225011681e-05, 'epoch': 1.06}
+[1A 35%|███▌      | 38/108 [00:42<01:08,  1.02it/s]
+[1A 36%|███▌      | 39/108 [00:43<01:10,  1.02s/it]                            
+{'loss': 0.2299, 'grad_norm': 0.60546875, 'learning_rate': 1.6414082196311402e-05, 'epoch': 1.09}
+[1A 36%|███▌      | 39/108 [00:43<01:10,  1.02s/it]
+[1A 37%|███▋      | 40/108 [00:45<01:11,  1.05s/it]                            
+{'loss': 0.2175, 'grad_norm': 1.484375, 'learning_rate': 1.6162284656009276e-05, 'epoch': 1.11}
+[1A 37%|███▋      | 40/108 [00:45<01:11,  1.05s/it]wandb: 429 encountered (Filestream rate limit exceeded, retrying in 2.5 seconds.), retrying request
+
+[1A 38%|███▊      | 41/108 [00:46<01:10,  1.06s/it]                            
+{'loss': 0.2289, 'grad_norm': 0.69140625, 'learning_rate': 1.5904023730059227e-05, 'epoch': 1.14}
+[1A 38%|███▊      | 41/108 [00:46<01:10,  1.06s/it]
+[1A 39%|███▉      | 42/108 [00:47<01:10,  1.07s/it]                            
+{'loss': 0.2183, 'grad_norm': 1.1484375, 'learning_rate': 1.5639570298509067e-05, 'epoch': 1.17}
+[1A 39%|███▉      | 42/108 [00:47<01:10,  1.07s/it]
+[1A 40%|███▉      | 43/108 [00:48<01:10,  1.09s/it]                            
+{'loss': 0.2463, 'grad_norm': 0.6328125, 'learning_rate': 1.536920173648984e-05, 'epoch': 1.2}
+[1A 40%|███▉      | 43/108 [00:48<01:10,  1.09s/it]
+[1A 41%|████      | 44/108 [00:49<01:09,  1.08s/it]                            
+{'loss': 0.2367, 'grad_norm': 0.765625, 'learning_rate': 1.5093201623287631e-05, 'epoch': 1.23}
+[1A 41%|████      | 44/108 [00:49<01:09,  1.08s/it]
+[1A 42%|████▏     | 45/108 [00:50<01:08,  1.09s/it]                            
+{'loss': 0.2362, 'grad_norm': 0.859375, 'learning_rate': 1.4811859444908053e-05, 'epoch': 1.26}
+[1A 42%|████▏     | 45/108 [00:50<01:08,  1.09s/it]
+[1A 43%|████▎     | 46/108 [00:51<01:08,  1.10s/it]                            
+{'loss': 0.2153, 'grad_norm': 0.5625, 'learning_rate': 1.4525470290445392e-05, 'epoch': 1.28}
+[1A 43%|████▎     | 46/108 [00:51<01:08,  1.10s/it]
+[1A 44%|████▎     | 47/108 [00:52<01:07,  1.10s/it]                            
+{'loss': 0.2306, 'grad_norm': 0.65625, 'learning_rate': 1.4234334542574906e-05, 'epoch': 1.31}
+[1A 44%|████▎     | 47/108 [00:52<01:07,  1.10s/it]
+[1A 44%|████▍     | 48/108 [00:53<01:07,  1.12s/it]                            
+{'loss': 0.2204, 'grad_norm': 0.6875, 'learning_rate': 1.3938757562492873e-05, 'epoch': 1.34}
+[1A 44%|████▍     | 48/108 [00:53<01:07,  1.12s/it]
+[1A 45%|████▌     | 49/108 [00:55<01:06,  1.13s/it]                            
+{'loss': 0.2288, 'grad_norm': 0.56640625, 'learning_rate': 1.3639049369634878e-05, 'epoch': 1.37}
+[1A 45%|████▌     | 49/108 [00:55<01:06,  1.13s/it]
+[1A 46%|████▋     | 50/108 [00:56<01:05,  1.13s/it]                            
+{'loss': 0.2386, 'grad_norm': 0.6484375, 'learning_rate': 1.3335524316508208e-05, 'epoch': 1.4}
+[1A 46%|████▋     | 50/108 [00:56<01:05,  1.13s/it]/usr/local/lib/python3.11/site-packages/torch/utils/checkpoint.py:295: FutureWarning: `torch.cpu.amp.autocast(args...)` is deprecated. Please use `torch.amp.autocast('cpu', args...)` instead.
+  with torch.enable_grad(), device_autocast_ctx, torch.cpu.amp.autocast(**ctx.cpu_autocast_kwargs):  # type: ignore[attr-defined]
+
+[1A 47%|████▋     | 51/108 [01:51<16:26, 17.31s/it]                            
+{'loss': 0.2089, 'grad_norm': 0.57421875, 'learning_rate': 1.3028500758979507e-05, 'epoch': 1.43}
+[1A 47%|████▋     | 51/108 [01:51<16:26, 17.31s/it]
+[1A 48%|████▊     | 52/108 [01:52<11:36, 12.44s/it]                            
+{'loss': 0.2144, 'grad_norm': 0.5078125, 'learning_rate': 1.2718300722363431e-05, 'epoch': 1.45}
+[1A 48%|████▊     | 52/108 [01:52<11:36, 12.44s/it]
+[1A 49%|████▉     | 53/108 [01:53<08:17,  9.05s/it]                            
+{'loss': 0.2107, 'grad_norm': 0.62890625, 'learning_rate': 1.2405249563662539e-05, 'epoch': 1.48}
+[1A 49%|████▉     | 53/108 [01:53<08:17,  9.05s/it]
+[1A 50%|█████     | 54/108 [01:54<05:59,  6.66s/it]                            
+{'loss': 0.2069, 'grad_norm': 0.50390625, 'learning_rate': 1.2089675630312755e-05, 'epoch': 1.51}
+[1A 50%|█████     | 54/108 [01:54<05:59,  6.66s/it]
+[1A 51%|█████     | 55/108 [01:55<04:24,  4.99s/it]                            
+{'loss': 0.2208, 'grad_norm': 0.5703125, 'learning_rate': 1.177190991579223e-05, 'epoch': 1.54}
+[1A 51%|█████     | 55/108 [01:55<04:24,  4.99s/it]
+[1A 52%|█████▏    | 56/108 [01:56<03:19,  3.83s/it]                            
+{'loss': 0.2149, 'grad_norm': 0.65234375, 'learning_rate': 1.1452285712454905e-05, 'epoch': 1.57}
+[1A 52%|█████▏    | 56/108 [01:56<03:19,  3.83s/it]
+[1A 53%|█████▎    | 57/108 [01:57<02:34,  3.02s/it]                            
+{'loss': 0.2127, 'grad_norm': 0.5, 'learning_rate': 1.1131138261952845e-05, 'epoch': 1.6}
+[1A 53%|█████▎    | 57/108 [01:57<02:34,  3.02s/it]
+[1A 54%|█████▎    | 58/108 [01:59<02:02,  2.45s/it]                            
+{'loss': 0.2103, 'grad_norm': 0.51171875, 'learning_rate': 1.0808804403614044e-05, 'epoch': 1.62}
+[1A 54%|█████▎    | 58/108 [01:59<02:02,  2.45s/it]
+[1A 55%|█████▍    | 59/108 [02:00<01:40,  2.06s/it]                            
+{'loss': 0.2368, 'grad_norm': 0.79296875, 'learning_rate': 1.0485622221144485e-05, 'epoch': 1.65}
+[1A 55%|█████▍    | 59/108 [02:00<01:40,  2.06s/it]
+[1A 56%|█████▌    | 60/108 [02:01<01:25,  1.78s/it]                            
+{'loss': 0.1947, 'grad_norm': 0.55078125, 'learning_rate': 1.0161930688025018e-05, 'epoch': 1.68}
+[1A 56%|█████▌    | 60/108 [02:01<01:25,  1.78s/it]
+[1A 56%|█████▋    | 61/108 [02:02<01:14,  1.58s/it]                            
+{'loss': 0.2273, 'grad_norm': 0.609375, 'learning_rate': 9.838069311974986e-06, 'epoch': 1.71}
+[1A 56%|█████▋    | 61/108 [02:02<01:14,  1.58s/it]
+[1A 57%|█████▋    | 62/108 [02:03<01:06,  1.46s/it]                            
+{'loss': 0.2062, 'grad_norm': 0.5234375, 'learning_rate': 9.514377778855521e-06, 'epoch': 1.74}
+[1A 57%|█████▋    | 62/108 [02:03<01:06,  1.46s/it]
+[1A 58%|█████▊    | 63/108 [02:04<01:00,  1.36s/it]                            
+{'loss': 0.1942, 'grad_norm': 0.494140625, 'learning_rate': 9.19119559638596e-06, 'epoch': 1.77}
+[1A 58%|█████▊    | 63/108 [02:04<01:00,  1.36s/it]
+[1A 59%|█████▉    | 64/108 [02:05<00:56,  1.29s/it]                            
+{'loss': 0.2058, 'grad_norm': 0.65625, 'learning_rate': 8.868861738047158e-06, 'epoch': 1.79}
+[1A 59%|█████▉    | 64/108 [02:05<00:56,  1.29s/it]
+[1A 60%|██████    | 65/108 [02:06<00:52,  1.23s/it]                            
+{'loss': 0.2045, 'grad_norm': 0.431640625, 'learning_rate': 8.5477142875451e-06, 'epoch': 1.82}
+[1A 60%|██████    | 65/108 [02:06<00:52,  1.23s/it]
+[1A 61%|██████    | 66/108 [02:08<00:50,  1.20s/it]                            
+{'loss': 0.2334, 'grad_norm': 0.494140625, 'learning_rate': 8.228090084207773e-06, 'epoch': 1.85}
+[1A 61%|██████    | 66/108 [02:08<00:50,  1.20s/it]
+[1A 62%|██████▏   | 67/108 [02:09<00:48,  1.18s/it]                            
+{'loss': 0.2204, 'grad_norm': 0.546875, 'learning_rate': 7.91032436968725e-06, 'epoch': 1.88}
+[1A 62%|██████▏   | 67/108 [02:09<00:48,  1.18s/it]
+[1A 63%|██████▎   | 68/108 [02:10<00:46,  1.16s/it]                            
+{'loss': 0.2159, 'grad_norm': 0.5234375, 'learning_rate': 7.594750436337467e-06, 'epoch': 1.91}
+[1A 63%|██████▎   | 68/108 [02:10<00:46,  1.16s/it]
+[1A 64%|██████▍   | 69/108 [02:11<00:45,  1.16s/it]                            
+{'loss': 0.202, 'grad_norm': 0.52734375, 'learning_rate': 7.2816992776365714e-06, 'epoch': 1.94}
+[1A 64%|██████▍   | 69/108 [02:11<00:45,  1.16s/it]
+[1A 65%|██████▍   | 70/108 [02:12<00:43,  1.16s/it]                            
+{'loss': 0.2176, 'grad_norm': 0.546875, 'learning_rate': 6.971499241020495e-06, 'epoch': 1.96}
+[1A 65%|██████▍   | 70/108 [02:12<00:43,  1.16s/it]
+[1A 66%|██████▌   | 71/108 [02:13<00:43,  1.17s/it]                            
+{'loss': 0.2005, 'grad_norm': 0.54296875, 'learning_rate': 6.664475683491797e-06, 'epoch': 1.99}
+[1A 66%|██████▌   | 71/108 [02:13<00:43,  1.17s/it]
+[1A 67%|██████▋   | 72/108 [02:14<00:33,  1.06it/s]                            
+{'loss': 0.2291, 'grad_norm': 0.953125, 'learning_rate': 6.360950630365126e-06, 'epoch': 2.0}
+[1A 67%|██████▋   | 72/108 [02:14<00:33,  1.06it/s]
+[1A 68%|██████▊   | 73/108 [02:15<00:34,  1.00it/s]                            
+{'loss': 0.2071, 'grad_norm': 0.50390625, 'learning_rate': 6.061242437507131e-06, 'epoch': 2.03}
+[1A 68%|██████▊   | 73/108 [02:15<00:34,  1.00it/s]
+[1A 69%|██████▊   | 74/108 [02:16<00:35,  1.04s/it]                            
+{'loss': 0.2099, 'grad_norm': 0.494140625, 'learning_rate': 5.765665457425102e-06, 'epoch': 2.06}
+[1A 69%|██████▊   | 74/108 [02:16<00:35,  1.04s/it]
+[1A 69%|██████▉   | 75/108 [02:17<00:34,  1.06s/it]                            
+{'loss': 0.2178, 'grad_norm': 0.486328125, 'learning_rate': 5.4745297095546125e-06, 'epoch': 2.09}
+[1A 69%|██████▉   | 75/108 [02:17<00:34,  1.06s/it]
+[1A 70%|███████   | 76/108 [02:18<00:34,  1.08s/it]                            
+{'loss': 0.2294, 'grad_norm': 0.52734375, 'learning_rate': 5.18814055509195e-06, 'epoch': 2.11}
+[1A 70%|███████   | 76/108 [02:18<00:34,  1.08s/it]
+[1A 71%|███████▏  | 77/108 [02:19<00:33,  1.09s/it]                            
+{'loss': 0.2191, 'grad_norm': 0.58203125, 'learning_rate': 4.9067983767123736e-06, 'epoch': 2.14}
+[1A 71%|███████▏  | 77/108 [02:19<00:33,  1.09s/it]
+[1A 72%|███████▏  | 78/108 [02:20<00:33,  1.11s/it]                            
+{'loss': 0.208, 'grad_norm': 0.48046875, 'learning_rate': 4.630798263510162e-06, 'epoch': 2.17}
+[1A
+[1A 72%|███████▏  | 78/108 [02:21<00:33,  1.11s/it]
+[1A 73%|███████▎  | 79/108 [02:22<00:32,  1.11s/it]                            
+{'loss': 0.1904, 'grad_norm': 0.51953125, 'learning_rate': 4.360429701490935e-06, 'epoch': 2.2}
+[1A 73%|███████▎  | 79/108 [02:22<00:32,  1.11s/it]
+[1A 74%|███████▍  | 80/108 [02:23<00:30,  1.11s/it]                            
+{'loss': 0.2055, 'grad_norm': 0.5, 'learning_rate': 4.095976269940777e-06, 'epoch': 2.23}
+[1A 74%|███████▍  | 80/108 [02:23<00:30,  1.11s/it]
+[1A 75%|███████▌  | 81/108 [02:24<00:30,  1.11s/it]                            
+{'loss': 0.1964, 'grad_norm': 0.478515625, 'learning_rate': 3.837715343990727e-06, 'epoch': 2.26}
+[1A 75%|███████▌  | 81/108 [02:24<00:30,  1.11s/it]
+{'loss': 0.2047, 'grad_norm': 0.478515625, 'learning_rate': 3.585917803688603e-06, 'epoch': 2.28}
+[1A 76%|███████▌  | 82/108 [02:25<00:28,  1.10s/it]                            
+[1A 76%|███████▌  | 82/108 [02:25<00:28,  1.10s/it]
+[1A 77%|███████▋  | 83/108 [02:26<00:27,  1.10s/it]                            
+{'loss': 0.2126, 'grad_norm': 0.51171875, 'learning_rate': 3.3408477498831917e-06, 'epoch': 2.31}
+[1A 77%|███████▋  | 83/108 [02:26<00:27,  1.10s/it]
+[1A 78%|███████▊  | 84/108 [02:27<00:26,  1.10s/it]                            
+{'loss': 0.1958, 'grad_norm': 0.482421875, 'learning_rate': 3.1027622272189572e-06, 'epoch': 2.34}
+[1A 78%|███████▊  | 84/108 [02:27<00:26,  1.10s/it]
+{'loss': 0.2165, 'grad_norm': 0.484375, 'learning_rate': 2.8719109545317102e-06, 'epoch': 2.37}
+[1A 79%|███████▊  | 85/108 [02:28<00:25,  1.09s/it]                            
+[1A 79%|███████▊  | 85/108 [02:28<00:25,  1.09s/it]
+[1A 80%|███████▉  | 86/108 [02:29<00:24,  1.09s/it]                            
+{'loss': 0.2073, 'grad_norm': 0.466796875, 'learning_rate': 2.648536062927999e-06, 'epoch': 2.4}
+[1A 80%|███████▉  | 86/108 [02:29<00:24,  1.09s/it]
+[1A 81%|████████  | 87/108 [02:30<00:23,  1.11s/it]                            
+{'loss': 0.219, 'grad_norm': 0.48046875, 'learning_rate': 2.432871841823047e-06, 'epoch': 2.43}
+[1A 81%|████████  | 87/108 [02:30<00:23,  1.11s/it]
+[1A 81%|████████▏ | 88/108 [02:32<00:22,  1.11s/it]                            
+{'loss': 0.2092, 'grad_norm': 0.498046875, 'learning_rate': 2.2251444932035094e-06, 'epoch': 2.45}
+[1A 81%|████████▏ | 88/108 [02:32<00:22,  1.11s/it]
+{'loss': 0.2126, 'grad_norm': 0.49609375, 'learning_rate': 2.025571894372794e-06, 'epoch': 2.48}
+[1A 82%|████████▏ | 89/108 [02:33<00:20,  1.10s/it]                            
+[1A 82%|████████▏ | 89/108 [02:33<00:20,  1.10s/it]
+[1A 83%|████████▎ | 90/108 [02:34<00:19,  1.11s/it]                            
+{'loss': 0.2163, 'grad_norm': 0.484375, 'learning_rate': 1.8343633694278895e-06, 'epoch': 2.51}
+[1A 83%|████████▎ | 90/108 [02:34<00:19,  1.11s/it]
+[1A 84%|████████▍ | 91/108 [02:35<00:18,  1.11s/it]                            
+{'loss': 0.2088, 'grad_norm': 0.478515625, 'learning_rate': 1.6517194697072903e-06, 'epoch': 2.54}
+[1A 84%|████████▍ | 91/108 [02:35<00:18,  1.11s/it]
+[1A 85%|████████▌ | 92/108 [02:36<00:17,  1.11s/it]                            
+{'loss': 0.1951, 'grad_norm': 0.47265625, 'learning_rate': 1.4778317634403082e-06, 'epoch': 2.57}
+[1A 85%|████████▌ | 92/108 [02:36<00:17,  1.11s/it]
+[1A 86%|████████▌ | 93/108 [02:37<00:16,  1.11s/it]                            
+{'loss': 0.1952, 'grad_norm': 0.49609375, 'learning_rate': 1.3128826348184886e-06, 'epoch': 2.6}
+[1A 86%|████████▌ | 93/108 [02:37<00:16,  1.11s/it]
+{'loss': 0.2022, 'grad_norm': 0.470703125, 'learning_rate': 1.1570450926997657e-06, 'epoch': 2.62}
+[1A 87%|████████▋ | 94/108 [02:38<00:15,  1.11s/it]                            
+[1A 87%|████████▋ | 94/108 [02:38<00:15,  1.11s/it]
+[1A 88%|████████▊ | 95/108 [02:39<00:14,  1.10s/it]                            
+{'loss': 0.2096, 'grad_norm': 0.462890625, 'learning_rate': 1.010482589146048e-06, 'epoch': 2.65}
+[1A 88%|████████▊ | 95/108 [02:39<00:14,  1.10s/it]
+[1A 89%|████████▉ | 96/108 [02:40<00:13,  1.10s/it]                            
+{'loss': 0.214, 'grad_norm': 0.45703125, 'learning_rate': 8.733488479845997e-07, 'epoch': 2.68}
+[1A 89%|████████▉ | 96/108 [02:40<00:13,  1.10s/it]
+[1A 90%|████████▉ | 97/108 [02:41<00:12,  1.11s/it]                            
+{'loss': 0.2196, 'grad_norm': 0.5234375, 'learning_rate': 7.457877035729588e-07, 'epoch': 2.71}
+[1A 90%|████████▉ | 97/108 [02:42<00:12,  1.11s/it]
+[1A 91%|█████████ | 98/108 [02:43<00:11,  1.11s/it]                            
+{'loss': 0.2036, 'grad_norm': 0.474609375, 'learning_rate': 6.279329499365649e-07, 'epoch': 2.74}
+[1A 91%|█████████ | 98/108 [02:43<00:11,  1.11s/it]
+[1A 92%|█████████▏| 99/108 [02:44<00:09,  1.11s/it]                            
+{'loss': 0.2333, 'grad_norm': 0.50390625, 'learning_rate': 5.199082004372958e-07, 'epoch': 2.77}
+[1A 92%|█████████▏| 99/108 [02:44<00:09,  1.11s/it]
+[1A 93%|█████████▎| 100/108 [02:45<00:08,  1.11s/it]                           
+{'loss': 0.1952, 'grad_norm': 0.55859375, 'learning_rate': 4.218267581201296e-07, 'epoch': 2.79}
+[1A 93%|█████████▎| 100/108 [02:45<00:08,  1.11s/it]/usr/local/lib/python3.11/site-packages/torch/utils/checkpoint.py:295: FutureWarning: `torch.cpu.amp.autocast(args...)` is deprecated. Please use `torch.amp.autocast('cpu', args...)` instead.
+  with torch.enable_grad(), device_autocast_ctx, torch.cpu.amp.autocast(**ctx.cpu_autocast_kwargs):  # type: ignore[attr-defined]
+
+{'loss': 0.2114, 'grad_norm': 0.5, 'learning_rate': 3.3379149687388866e-07, 'epoch': 2.82}
+[1A 94%|█████████▎| 101/108 [03:36<01:53, 16.17s/it]                           
+[1A 94%|█████████▎| 101/108 [03:36<01:53, 16.17s/it]
+[1A 94%|█████████▍| 102/108 [03:37<01:09, 11.65s/it]                           
+{'loss': 0.2116, 'grad_norm': 0.48046875, 'learning_rate': 2.5589475353073987e-07, 'epoch': 2.85}
+[1A 94%|█████████▍| 102/108 [03:37<01:09, 11.65s/it]
+[1A 95%|█████████▌| 103/108 [03:38<00:42,  8.48s/it]                           
+{'loss': 0.2091, 'grad_norm': 0.51171875, 'learning_rate': 1.8821823101760949e-07, 'epoch': 2.88}
+[1A 95%|█████████▌| 103/108 [03:38<00:42,  8.48s/it]
+[1A 96%|█████████▋| 104/108 [03:39<00:25,  6.27s/it]                           
+{'loss': 0.1963, 'grad_norm': 0.466796875, 'learning_rate': 1.30832912661093e-07, 'epoch': 2.91}
+[1A 96%|█████████▋| 104/108 [03:39<00:25,  6.27s/it]
+{'loss': 0.2091, 'grad_norm': 0.45703125, 'learning_rate': 8.379898773574924e-08, 'epoch': 2.94}
+[1A 97%|█████████▋| 105/108 [03:41<00:14,  4.71s/it]                           
+[1A 97%|█████████▋| 105/108 [03:41<00:14,  4.71s/it]
+[1A 98%|█████████▊| 106/108 [03:42<00:07,  3.65s/it]                           
+{'loss': 0.22, 'grad_norm': 0.50390625, 'learning_rate': 4.716578833386054e-08, 'epoch': 2.96}
+[1A 98%|█████████▊| 106/108 [03:42<00:07,  3.65s/it]
+[1A 99%|█████████▉| 107/108 [03:43<00:02,  2.88s/it]                           
+{'loss': 0.2018, 'grad_norm': 0.470703125, 'learning_rate': 2.0971737622883515e-08, 'epoch': 2.99}
+[1A 99%|█████████▉| 107/108 [03:43<00:02,  2.88s/it]
+[1A100%|██████████| 108/108 [03:43<00:00,  2.13s/it]                           
+{'loss': 0.1752, 'grad_norm': 0.9140625, 'learning_rate': 5.2443095448506674e-09, 'epoch': 3.0}
+[1A100%|██████████| 108/108 [03:43<00:00,  2.13s/it]                                                 100%|██████████| 108/108 [04:39<00:00,  2.13s/it]100%|██████████| 108/108 [04:39<00:00,  2.59s/it]
+{'train_runtime': 281.4557, 'train_samples_per_second': 47.965, 'train_steps_per_second': 0.384, 'train_loss': 0.3985391366812918, 'epoch': 3.0}
+💾 Saving model...
+✅ Training completed! Model saved to: /root/output_models/qwen3-4b-sft-3epochs-distributed
+wandb: - 0.008 MB of 0.008 MB uploaded
+[1Awandb: 
+wandb: Run history:
+wandb:         train/epoch ▁▁▁▂▂▂▂▂▂▃▃▃▃▃▃▄▄▄▄▄▅▅▅▅▅▆▆▆▆▆▆▇▇▇▇▇████
+wandb:   train/global_step ▁▁▁▂▂▂▂▂▂▃▃▃▃▃▃▄▄▄▄▄▅▅▅▅▅▆▆▆▆▆▆▇▇▇▇▇▇███
+wandb:     train/grad_norm █▇▃▂▂▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁
+wandb: train/learning_rate ▁▂▄▆▇██████▇▇▇▇▆▆▆▆▅▅▅▄▄▄▄▃▃▃▂▂▂▂▂▁▁▁▁▁▁
+wandb:          train/loss ██▇▅▄▂▂▂▂▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁
+wandb: 
+wandb: Run summary:
+wandb:               total_flos 1.1965021078264218e+17
+wandb:              train/epoch 3.0
+wandb:        train/global_step 108
+wandb:          train/grad_norm 0.91406
+wandb:      train/learning_rate 0.0
+wandb:               train/loss 0.1752
+wandb:               train_loss 0.39854
+wandb:            train_runtime 281.4557
+wandb: train_samples_per_second 47.965
+wandb:   train_steps_per_second 0.384
+wandb: 
+wandb: 🚀 View run qwen-sft-qwen3-4b-3epochs-distributed at: https://wandb.ai/pawalt/qwen3-filesystem-sft/runs/abkd0x9d
+wandb: ⭐️ View project at: https://wandb.ai/pawalt/qwen3-filesystem-sft
+wandb: Synced 5 W&B file(s), 0 media file(s), 0 artifact file(s) and 0 other file(s)
+wandb: Find logs at: ./wandb/run-20251019_200933-abkd0x9d/logs
+wandb: WARNING The new W&B backend becomes opt-out in version 0.18.0; try it out with `wandb.require("core")`! See https://wandb.me/wandb-core for more information.
+✅ Distributed training completed successfully!
+
+Stopping app - local entrypoint completed.
+✓ App completed. View run at 
+https://modal.com/apps/rl-for-fun/main/ap-Ff69c5OJvQ2pjsNNRHpoNp
