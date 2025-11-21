@@ -3,8 +3,6 @@ import os
 from datetime import datetime
 from typing import Dict, Any, List, Optional
 
-import torch
-
 from llmfuse.utils import STATE_STOP_TOKEN
 
 from .postprocess import (
@@ -90,12 +88,14 @@ def evaluate_model_local(model_dir: str, dataset_path: str, limit: Optional[int]
     use_vllm = False
     try:
         import vllm  # noqa: F401
+        import torch  # delayed import to avoid heavy deps when unused
         use_vllm = True
     except Exception:
         use_vllm = False
 
     if use_vllm:
         from vllm import LLM, SamplingParams
+        import torch  # noqa: F401 - needed for device checks
         if torch.cuda.is_available():
             print(f"[EVAL] CUDA available: True, device_count={torch.cuda.device_count()}")
         else:
@@ -161,6 +161,7 @@ def evaluate_model_local(model_dir: str, dataset_path: str, limit: Optional[int]
                 print(f"Progress: {done}/{total}")
     else:
         print("[EVAL] vLLM not available; falling back to transformers")
+        import torch
         from transformers import AutoModelForCausalLM, AutoTokenizer
         tokenizer = AutoTokenizer.from_pretrained(model_dir)
         model = AutoModelForCausalLM.from_pretrained(

@@ -61,9 +61,6 @@ class LLMEncode:
         if temperature != 0.0:
             raise ValueError("Temperature must be 0.0 for deterministic compression/decompression")
         
-        if max_tokens > 1000:
-            raise ValueError("Max tokens limited to 1000 as per requirements")
-        
         self.model_name = model_name
         self.max_tokens = max_tokens
         self.temperature = temperature

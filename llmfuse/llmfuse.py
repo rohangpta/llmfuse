@@ -10,7 +10,7 @@ import json
 import os
 import sys
 from datetime import datetime
-from errno import EEXIST, ENOENT, EIO
+from errno import EEXIST, ENOENT, EIO, EISDIR
 from stat import S_IFDIR, S_IFLNK, S_IFREG
 from time import time
 from typing import Any, Dict, List, Optional, Tuple
@@ -20,6 +20,7 @@ from fuse import FUSE, FuseOSError, LoggingMixIn, Operations
 
 from eval.runner import build_prompt_with_contract
 from llmfuse.fs_state import FSState, FileEntry
+from llmfuse.state_codec import CompressedStateStore, StateCodecManager
 from llmfuse.utils import extract_result_from_llm_output
 
 
@@ -62,6 +63,8 @@ def _call_remote_model(prompt: str, temperature: float = 0.0) -> str:
                 headers["X-LLMFuse-Token"] = token
 
             payload = {"prompt": prompt, "temperature": temperature}
+            print(f"[LLMFUSE] Remote LLM call -> {endpoint} (attempt {attempt + 1}/{max_retries + 1})")
+            print(f"[LLMFUSE] Prompt:\n{prompt}")
             response = requests.post(
                 endpoint,
                 json=payload,
@@ -70,7 +73,9 @@ def _call_remote_model(prompt: str, temperature: float = 0.0) -> str:
             )
             response.raise_for_status()
             data = response.json()
-            return data.get("text", "").strip()
+            text = data.get("text", "").strip()
+            print(f"[LLMFUSE] Remote LLM response:\n{text}")
+            return text
         except Exception as exc:
             last_error = exc
     raise RuntimeError(f"Remote LLM request failed: {last_error}")
@@ -106,6 +111,7 @@ class LLMFuse(LoggingMixIn, Operations):
     def __init__(self, initial_state: Optional[str] = None, root_owner: str = "root", root_group: str = "root", root_mode: int = 0o755):
         self.fs_state = FSState(root_path=None)
         self.fd = 0
+        self._state_store = CompressedStateStore(StateCodecManager())
 
         # Initialize with provided state or empty filesystem
         if initial_state:
@@ -123,21 +129,30 @@ class LLMFuse(LoggingMixIn, Operations):
                     size=0,
                 )
             }
+            self._state_store.update(self.fs_state.to_xml_string(include_contents=True, max_file_size=10_000))
 
         # Special handling for /dev/llm
         self.llm_device_content = ""
 
     def _get_state_string(self) -> str:
         """Get current filesystem state as a tree string."""
-        return self.fs_state.to_xml_string(include_contents=True, max_file_size=10_000)
+        cached = self._state_store.get()
+        if cached:
+            return cached
+
+        fresh = self.fs_state.to_xml_string(include_contents=True, max_file_size=10_000)
+        self._state_store.update(fresh)
+        return fresh
 
     def _load_state_from_xml(self, xml_state: str) -> None:
         """Parse filesystem state from canonical XML into FSState."""
         self.fs_state.from_xml_string(xml_state)
+        self._state_store.update(xml_state)
 
     def _handle_llm_response(self, response: str) -> bool:
         """Handle LLM response and update filesystem state."""
-        print(f"DEBUG: _handle_llm_response called with response starting: {response[:50]}...")
+        print("DEBUG: _handle_llm_response called with full response:")
+        print(response)
         if response.startswith("ERROR:"):
             print(f"LLM operation failed: {response}")
             return False
@@ -331,7 +346,16 @@ class LLMFuse(LoggingMixIn, Operations):
         response = self._query_llm_for_operation('create', path, mode=oct(mode))
         if not self._handle_llm_response(response):
             raise FuseOSError(EEXIST)
-        
+
+        rel = path.lstrip("/")
+        entry = self.fs_state.get_state(rel)
+        if entry is None:
+            print(f"[LLMFUSE] Create failed: missing entry for {path}")
+            raise FuseOSError(EIO)
+        if entry.is_dir:
+            print(f"[LLMFUSE] Create failed: LLM returned directory for file {path}")
+            raise FuseOSError(EIO)
+
         self.fd += 1
         return self.fd
 
@@ -376,6 +400,10 @@ class LLMFuse(LoggingMixIn, Operations):
         response = self._query_llm_for_operation('read', path, size=size, offset=offset, fh=fh, response_mode="text")
         if response.startswith("ERROR:"):
             raise FuseOSError(EIO)
+        rel = path.lstrip("/")
+        entry = self.fs_state.get_state(rel)
+        if entry and entry.is_dir:
+            raise FuseOSError(EISDIR)
         cleaned = extract_result_from_llm_output(response)
         data = cleaned.encode('utf-8')
         start = min(offset, len(data))
@@ -419,6 +447,7 @@ Provide a helpful answer based on the current filesystem state:"""
         )
         if not self._handle_llm_response(response):
             raise FuseOSError(EIO)
+
         return len(data)
 
     def truncate(self, path, length, fh=None):

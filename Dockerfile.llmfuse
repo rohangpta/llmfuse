@@ -16,8 +16,8 @@ RUN apt-get update && \
 
 WORKDIR /app
 
-COPY requirements.txt .
-RUN pip install -r requirements.txt
+# Minimal runtime dependencies (remote inference only)
+RUN pip install --no-cache-dir fusepy requests
 
 # Copy the entire repository (keeps infra + data helpers for reference)
 COPY . .

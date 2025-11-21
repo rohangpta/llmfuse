@@ -16,7 +16,6 @@ echo "📂 Mount directory: ${MOUNT_DIR}"
 echo "🌐 Remote endpoint: ${LLMFUSE_REMOTE_ENDPOINT:-<not set>}"
 
 docker run \
-  --rm \
   --privileged \
   --device /dev/fuse \
   --cap-add SYS_ADMIN \
