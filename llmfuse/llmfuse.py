@@ -20,7 +20,6 @@ from fuse import FUSE, FuseOSError, LoggingMixIn, Operations
 
 from eval.runner import build_prompt_with_contract
 from llmfuse.fs_state import FSState, FileEntry
-from llmfuse.state_codec import CompressedStateStore, StateCodecManager
 from llmfuse.utils import extract_result_from_llm_output
 
 
@@ -111,11 +110,10 @@ class LLMFuse(LoggingMixIn, Operations):
     def __init__(self, initial_state: Optional[str] = None, root_owner: str = "root", root_group: str = "root", root_mode: int = 0o755):
         self.fs_state = FSState(root_path=None)
         self.fd = 0
-        self._state_store = CompressedStateStore(StateCodecManager())
 
         # Initialize with provided state or empty filesystem
         if initial_state:
-            self._load_state_from_xml(initial_state)
+            self.fs_state.from_xml_string(initial_state)
         else:
             now = time()
             self.fs_state.state = {
@@ -129,25 +127,17 @@ class LLMFuse(LoggingMixIn, Operations):
                     size=0,
                 )
             }
-            self._state_store.update(self.fs_state.to_xml_string(include_contents=True, max_file_size=10_000))
 
         # Special handling for /dev/llm
         self.llm_device_content = ""
 
     def _get_state_string(self) -> str:
-        """Get current filesystem state as a tree string."""
-        cached = self._state_store.get()
-        if cached:
-            return cached
-
-        fresh = self.fs_state.to_xml_string(include_contents=True, max_file_size=10_000)
-        self._state_store.update(fresh)
-        return fresh
+        """Get current filesystem state as XML string."""
+        return self.fs_state.to_xml_string(include_contents=True, max_file_size=10_000)
 
     def _load_state_from_xml(self, xml_state: str) -> None:
         """Parse filesystem state from canonical XML into FSState."""
         self.fs_state.from_xml_string(xml_state)
-        self._state_store.update(xml_state)
 
     def _handle_llm_response(self, response: str) -> bool:
         """Handle LLM response and update filesystem state."""

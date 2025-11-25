@@ -21,6 +21,5 @@ docker run \
   --cap-add SYS_ADMIN \
   --security-opt apparmor:unconfined \
   -e LLMFUSE_REMOTE_ENDPOINT="${LLMFUSE_REMOTE_ENDPOINT:-}" \
-  -e LLMFUSE_REMOTE_TOKEN="${LLMFUSE_REMOTE_TOKEN:-}" \
   -v "${MOUNT_DIR}:/mnt/llmfuse" \
   "${IMAGE_NAME}"
