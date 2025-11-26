@@ -146,15 +146,20 @@ class LLMEncode:
         Returns:
             Encoding statistics
         """
-        result = self.encode(text)
-        
-        # Save to file using pickle for reliable serialization
+        compressed_bytes = self.encode(text)
+
+        # Save compressed bytes and metadata to file using pickle
         with open(output_path, 'wb') as f:
-            pickle.dump(result, f)
-        
-        print(f"Compressed data saved to: {output_path}")
-        
-        return result['stats']
+            pickle.dump({
+                'compressed': compressed_bytes,
+                'metadata': self._last_metadata
+            }, f)
+
+        return {
+            'original_size': len(text),
+            'compressed_size': len(compressed_bytes),
+            'compression_ratio': len(text) / len(compressed_bytes) if compressed_bytes else 0
+        }
     
     def decode_from_file(self, input_path: str) -> str:
         """
@@ -169,11 +174,12 @@ class LLMEncode:
         from pathlib import Path
         if not Path(input_path).exists():
             raise FileNotFoundError(f"Compressed file not found: {input_path}")
-        
+
         with open(input_path, 'rb') as f:
-            encoded_result = pickle.load(f)
-        
-        return self.decode(encoded_result)
+            data = pickle.load(f)
+
+        self._last_metadata = data['metadata']
+        return self.decode(data['compressed'])
     
     def test_roundtrip(self, text: str, verbose: bool = False) -> Dict[str, Any]:
         """
