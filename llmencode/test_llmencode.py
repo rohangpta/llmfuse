@@ -10,15 +10,13 @@ import sys
 import time
 import traceback
 import unittest.mock
-from typing import List, Dict, Any
 
 from llmencode import LLMEncode
 
 
 def mock_compress_with_model_probs(text, model_name="qwen3-4b", max_tokens=1000, verbose=False):
     """Mock compression function for testing."""
-    # Simulate compression - just create some dummy compressed data
-    compressed_bytes = text.encode('utf-8')[:len(text)//2]  # "Compress" to half size
+    compressed_bytes = text.encode('utf-8')[:len(text)//2]
     metadata = {
         'original_length': len(text),
         'num_tokens': len(text.split()),
@@ -31,14 +29,7 @@ def mock_compress_with_model_probs(text, model_name="qwen3-4b", max_tokens=1000,
 
 def mock_decompress_with_model_probs(compressed_bytes, metadata, verbose=False):
     """Mock decompression function for testing."""
-    # For testing, just return a predictable string based on metadata
     return "Mock decompressed text for testing"
-
-
-# Mock the model functions to avoid downloading models
-import common.model
-original_compress = common.model.compress_with_model_probs
-original_decompress = common.model.decompress_with_model_probs
 
 
 def test_basic_arithmetic_coding():

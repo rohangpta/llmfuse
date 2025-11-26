@@ -9,9 +9,8 @@ the filesystem state as a text representation and querying the LLM for each oper
 import json
 import os
 import sys
-from datetime import datetime
 from errno import EEXIST, ENOENT, EIO, EISDIR
-from stat import S_IFDIR, S_IFLNK, S_IFREG
+from stat import S_IFDIR, S_IFREG
 from time import time
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -24,7 +23,6 @@ from llmfuse.utils import extract_result_from_llm_output
 
 
 REMOTE_ENDPOINT_ENV = "LLMFUSE_REMOTE_ENDPOINT"
-REMOTE_TOKEN_ENV = "LLMFUSE_REMOTE_TOKEN"
 REMOTE_TIMEOUT_ENV = "LLMFUSE_REMOTE_TIMEOUT"
 REMOTE_RETRY_ENV = "LLMFUSE_REMOTE_RETRIES"
 DEFAULT_REMOTE_TIMEOUT = 30
@@ -52,14 +50,11 @@ def _call_remote_model(prompt: str, temperature: float = 0.0) -> str:
 
     timeout = float(os.environ.get(REMOTE_TIMEOUT_ENV, DEFAULT_REMOTE_TIMEOUT))
     max_retries = int(os.environ.get(REMOTE_RETRY_ENV, DEFAULT_REMOTE_RETRIES))
-    token = os.environ.get(REMOTE_TOKEN_ENV)
 
     last_error: Optional[Exception] = None
     for attempt in range(max_retries + 1):
         try:
             headers = {"Content-Type": "application/json"}
-            if token:
-                headers["X-LLMFuse-Token"] = token
 
             payload = {"prompt": prompt, "temperature": temperature}
             print(f"[LLMFUSE] Remote LLM call -> {endpoint} (attempt {attempt + 1}/{max_retries + 1})")
@@ -141,10 +136,7 @@ class LLMFuse(LoggingMixIn, Operations):
 
     def _handle_llm_response(self, response: str) -> bool:
         """Handle LLM response and update filesystem state."""
-        print("DEBUG: _handle_llm_response called with full response:")
-        print(response)
         if response.startswith("ERROR:"):
-            print(f"LLM operation failed: {response}")
             return False
 
         try:
@@ -152,10 +144,8 @@ class LLMFuse(LoggingMixIn, Operations):
             if "<filesystem" not in cleaned:
                 raise ValueError("LLM response did not contain <filesystem>")
             self._load_state_from_xml(cleaned)
-            print("DEBUG: Successfully parsed LLM response")
             return True
-        except Exception as e:
-            print(f"Failed to parse LLM response: {e}")
+        except Exception:
             return False
 
     def _format_operation_call(self, operation: str, args: Tuple[Any, ...], kwargs: Dict[str, Any]) -> str:
@@ -202,8 +192,6 @@ class LLMFuse(LoggingMixIn, Operations):
 
     def getattr(self, path, fh=None):
         """Get file attributes."""
-        print(f"DEBUG: getattr called for path: {path}")
-        
         # Handle special /dev/llm device
         if path == '/dev/llm':
             now = time()
@@ -264,8 +252,6 @@ class LLMFuse(LoggingMixIn, Operations):
 
     def readdir(self, path, fh):
         """Read directory contents."""
-        print(f"DEBUG: readdir called for path: {path}")
-
         if path == '/dev':
             return ['.', '..', 'llm']
 
@@ -275,8 +261,7 @@ class LLMFuse(LoggingMixIn, Operations):
             entries = json.loads(cleaned)
             if not isinstance(entries, list):
                 raise ValueError("readdir response was not a list")
-        except Exception as exc:
-            print(f"DEBUG: readdir fallback due to {exc}")
+        except Exception:
             entries = self._fallback_readdir_entries(path)
 
         normalized = []
@@ -323,27 +308,19 @@ class LLMFuse(LoggingMixIn, Operations):
 
     def mkdir(self, path, mode):
         """Create a directory."""
-        print(f"DEBUG: mkdir called for path: {path}")
         response = self._query_llm_for_operation('mkdir', path, mode=oct(mode))
         if not self._handle_llm_response(response):
-            print(f"DEBUG: mkdir failed, raising EEXIST for {path}")
             raise FuseOSError(EEXIST)
-        print(f"DEBUG: mkdir succeeded for {path}")
 
     def create(self, path, mode):
         """Create a file."""
-        print(f"DEBUG: create called for path: {path}")
         response = self._query_llm_for_operation('create', path, mode=oct(mode))
         if not self._handle_llm_response(response):
             raise FuseOSError(EEXIST)
 
         rel = path.lstrip("/")
         entry = self.fs_state.get_state(rel)
-        if entry is None:
-            print(f"[LLMFUSE] Create failed: missing entry for {path}")
-            raise FuseOSError(EIO)
-        if entry.is_dir:
-            print(f"[LLMFUSE] Create failed: LLM returned directory for file {path}")
+        if entry is None or entry.is_dir:
             raise FuseOSError(EIO)
 
         self.fd += 1
@@ -376,7 +353,6 @@ class LLMFuse(LoggingMixIn, Operations):
 
     def open(self, path, flags):
         """Open a file."""
-        print(f"DEBUG: open called for path: {path}")
         self.fd += 1
         return self.fd
 
@@ -402,7 +378,6 @@ class LLMFuse(LoggingMixIn, Operations):
 
     def write(self, path, data, offset, fh):
         """Write to a file."""
-        print(f"DEBUG: write called for path: {path}, data length: {len(data)}")
         if path == '/dev/llm':
             # Handle writes to the LLM device
             question = data.decode('utf-8').strip()
