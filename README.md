@@ -79,7 +79,7 @@ The maintained model target is Qwen3-4B. Pass it explicitly; the trimmed trainin
 pipeline rejects other model names.
 
 ```bash
-DATASET=$(find data/train -type f -name 'fuse_*.jsonl' | sort | tail -1)
+DATASET=$(find data/train -type f -name 'fuse_*.jsonl' 2>/dev/null | sort | tail -1)
 test -n "$DATASET" || { echo "Generate data first"; exit 1; }
 
 modal run train/sft_modal.py::train_qwen \
@@ -90,15 +90,16 @@ modal run train/sft_modal.py::train_qwen \
 
 Training downloads the base model with the Modal secret `huggingface-secret`. The
 Modal function also declares `wandb-secret` because W&B logging is enabled by
-default.
+default. The command above writes a Modal volume folder named
+`qwen3-4b-sft-8epochs-distributed`.
 
 ## Evaluate
 
-Use the model folder returned by training. The command below matches the 8-epoch
-example above.
+Use the model folder from training. The command below matches the 8-epoch example
+above; replace the folder name if you trained with different settings.
 
 ```bash
-DATASET=$(find data/train -type f -name 'fuse_*.jsonl' | sort | tail -1)
+DATASET=$(find data/train -type f -name 'fuse_*.jsonl' 2>/dev/null | sort | tail -1)
 test -n "$DATASET" || { echo "Generate data first"; exit 1; }
 
 modal run eval/modal_eval.py::eval_on_dataset \
@@ -112,8 +113,7 @@ of examples above the similarity threshold.
 
 ## Serve and mount
 
-Deploy the trained model as a Modal endpoint, again using the folder name from
-training:
+Deploy the trained model as a Modal endpoint, using the same model folder name:
 
 ```bash
 modal run infra/modal_llmfuse.py::deploy \
