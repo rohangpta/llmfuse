@@ -1,18 +1,30 @@
-# LLM-FUSE
+# llmfuse
 
-LLM-FUSE turns filesystem operations into prompts. It mounts a FUSE filesystem,
-sends each operation plus the current XML tree to a language model, and treats the
+`llmfuse` is a FUSE filesystem backed by a language model. It sends each
+filesystem operation, plus the current XML tree, to the model and treats the
 model response as the filesystem result.
 
-Write-like operations such as `mkdir`, `write`, `rename`, and `unlink` must return
-the complete next `<filesystem>` XML document. Read-like operations such as
-`read` and `readdir` return only the requested content or listing. There is no
-normal backing store; the live tree is the XML state the model last produced.
+The filesystem contract is intentionally narrow:
 
-That makes state drift easy to see. File contents, directory structure,
-permissions, and metadata either survive a sequence of mutations or they do not.
+- State-changing operations such as `mkdir`, `write`, `rename`, and `unlink`
+  return the complete next `<filesystem>` XML document.
+- Read-like operations such as `read`, `readdir`, and `readlink` return only the
+  requested content, listing, or target.
+- There is no normal backing store. The live tree is the XML state the model last
+  produced.
 
-## How it works
+That makes drift easy to inspect: file contents, directory structure,
+permissions, and metadata either survive a sequence of operations or they do not.
+
+## Workflow
+
+```text
+reference FUSE mount
+  -> generated prompt/completion JSONL
+  -> Qwen3-4B supervised fine-tune
+  -> Modal /generate endpoint
+  -> llmfuse mount
+```
 
 1. `train/reference_fuse.py` runs a normal FUSE filesystem and logs real calls.
 2. `train/generate_data.py` drives shell operations against that mount, snapshots
@@ -21,25 +33,30 @@ permissions, and metadata either survive a sequence of mutations or they do not.
    by `<END_FS>`. Query examples use `<R>` prompts and expect the exact value.
 4. `train/sft_modal.py` fine-tunes Qwen3-4B on those examples via Modal.
 5. `infra/modal_llmfuse.py` serves the trained model as a `/generate` endpoint.
-6. `llmfuse/llmfuse.py` mounts the LLM-backed filesystem and forwards operations
-   to that endpoint.
+6. `llmfuse/llmfuse.py` mounts the model-backed filesystem and forwards
+   operations to that endpoint.
 
-## Repository layout
+## Repository map
 
 ```text
 common/       Qwen3-4B model loading and helpers
 eval/         Evaluation runner, metrics, and postprocessing
-infra/        Modal HTTP serving for LLM-FUSE and compression experiments
+infra/        Modal HTTP serving for llmfuse and compression experiments
 llmencode/    Separate compression playground; not part of the filesystem path
 llmfuse/      FUSE implementation and XML filesystem state model
 scripts/      Operational helpers such as dump_fs_xml and run_llmfuse
 train/        Reference FUSE, data generation, and SFT scripts
 ```
 
-## Setup
+## Requirements
 
-Use Python 3.11 or 3.12 for the project environment. FUSE data generation and
-mounting need Linux; the Docker commands below assume a host with `/dev/fuse`.
+- Python 3.11 or 3.12
+- Docker on a Linux host with `/dev/fuse` for data generation and mounting
+- A Modal account for training, evaluation, and serving
+- Modal secrets named `huggingface-secret` and `wandb-secret` for the training
+  path shown below
+
+## Setup
 
 ```bash
 python3 -m venv .venv
@@ -54,7 +71,7 @@ pip install modal
 modal setup
 ```
 
-## Generate training data
+## Generate data
 
 Data generation runs in Docker because it needs FUSE privileges.
 
@@ -144,21 +161,11 @@ rm mount/proj/notes.md
 
 `llmencode/` is a separate compression playground. It uses next-token
 probabilities from a language model to drive arithmetic coding; it does not train
-or serve the LLM-FUSE filesystem.
+or serve the llmfuse filesystem.
 
 ```bash
 python3 -m llmencode.llmencode test "Hello world" --model qwen3-4b --verbose
 ```
-
-## Limits
-
-- Not a production filesystem. The FUSE surface is intentionally small and not
-  POSIX-complete.
-- Every state-changing operation rewrites the full XML tree, so prompt size grows
-  with the number of files.
-- File bodies are included only when they fit within configured size limits.
-- Malformed model output, including bad XML or extra prose, fails the operation.
-- Qwen3-4B is the only maintained model target in this repo.
 
 ## Tests
 
@@ -176,3 +183,21 @@ PY
 
 End-to-end FUSE tests need a running model backend and Linux FUSE support. The
 `fuse_integration` Docker Compose service is the path for that when configured.
+
+## Limits
+
+- Not a production filesystem. The FUSE surface is intentionally small and not
+  POSIX-complete.
+- Every state-changing operation rewrites the full XML tree, so prompt size grows
+  with the number of files.
+- File bodies are included only when they fit within configured size limits.
+- Malformed model output, including bad XML or extra prose, fails the operation.
+- Qwen3-4B is the only maintained model target in this repo.
+
+## Related writing
+
+The companion post, [Compressed Filesystems a la Language Models][post],
+explains the original experiment, training setup, and compression angle behind
+`llmfuse`.
+
+[post]: https://grohan.co/2025/11/25/llmfuse/
